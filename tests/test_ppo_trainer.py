@@ -17,7 +17,6 @@ import gc
 import re
 import tempfile
 import unittest
-from functools import partial
 
 import pytest
 import torch
@@ -181,7 +180,7 @@ class PPOTrainerTester(unittest.TestCase):
         )
         dummy_dataloader = ppo_trainer.dataloader
 
-        assert len(dummy_dataloader) == 0
+        self.assertEqual(len(dummy_dataloader), 0)
 
     def test_ppo_step(self):
         # initialize dataset
@@ -194,7 +193,6 @@ class PPOTrainerTester(unittest.TestCase):
             tokenizer=self.gpt2_tokenizer,
             dataset=dummy_dataset,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         dummy_dataloader = ppo_trainer.dataloader
         # train model with ppo
         for query_tensor, response_tensor in dummy_dataloader:
@@ -202,7 +200,7 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(0.0)]
             # train model
-            train_stats = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            train_stats = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         for param in ppo_trainer.model.parameters():
@@ -222,7 +220,6 @@ class PPOTrainerTester(unittest.TestCase):
             tokenizer=self.gpt2_tokenizer,
             dataset=dummy_dataset,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         dummy_dataloader = ppo_trainer.dataloader
         # train model with ppo
         for query_tensor, response_tensor in dummy_dataloader:
@@ -233,7 +230,9 @@ class PPOTrainerTester(unittest.TestCase):
             response_mask = [torch.ones_like(r) for r in response_tensor]
 
             # train model
-            train_stats = ppo_trainer.step(list(query_tensor), list(response_tensor), reward, response_mask)
+            train_stats = ppo_trainer.step(
+                [q for q in query_tensor], [r for r in response_tensor], reward, response_mask
+            )
             break
 
         for param in ppo_trainer.model.parameters():
@@ -255,10 +254,9 @@ class PPOTrainerTester(unittest.TestCase):
             tokenizer=self.gpt2_tokenizer,
             dataset=dummy_dataset,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         dummy_dataloader = ppo_trainer.dataloader
 
-        assert isinstance(ppo_trainer.optimizer.optimizer, torch.optim.SGD)
+        self.assertTrue(isinstance(ppo_trainer.optimizer.optimizer, torch.optim.SGD))
 
         # train model with ppo
         for query_tensor, response_tensor in dummy_dataloader:
@@ -266,15 +264,15 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(0.0)]
             # train model
-            train_stats = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            train_stats = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         for name, param in ppo_trainer.model.named_parameters():
-            assert param.grad is not None, f"Parameter {name} has no gradient"
+            self.assertTrue(param.grad is not None, f"Parameter {name} has no gradient")
 
         # ref model should not be trained
         for name, param in ppo_trainer.ref_model.named_parameters():
-            assert param.grad is None, f"Parameter {name} has a gradient"
+            self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
 
         # Finally check stats
         for stat in EXPECTED_STATS:
@@ -295,11 +293,10 @@ class PPOTrainerTester(unittest.TestCase):
             dataset=dummy_dataset,
             lr_scheduler=lr_scheduler,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         dummy_dataloader = ppo_trainer.dataloader
 
-        assert isinstance(ppo_trainer.optimizer.optimizer, torch.optim.SGD)
-        assert isinstance(ppo_trainer.lr_scheduler.scheduler, torch.optim.lr_scheduler.ExponentialLR)
+        self.assertTrue(isinstance(ppo_trainer.optimizer.optimizer, torch.optim.SGD))
+        self.assertTrue(isinstance(ppo_trainer.lr_scheduler.scheduler, torch.optim.lr_scheduler.ExponentialLR))
 
         # train model with ppo
         for query_tensor, response_tensor in dummy_dataloader:
@@ -307,23 +304,23 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(0.0)]
             # train model
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
-            train_stats = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
+            train_stats = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         for name, param in ppo_trainer.model.named_parameters():
-            assert param.grad is not None, f"Parameter {name} has no gradient"
+            self.assertTrue(param.grad is not None, f"Parameter {name} has no gradient")
 
         # ref model should not be trained
         for name, param in ppo_trainer.ref_model.named_parameters():
-            assert param.grad is None, f"Parameter {name} has a gradient"
+            self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
 
         # Finally check stats
         for stat in EXPECTED_STATS:
             assert stat in train_stats.keys()
 
         # assert that the LR has increased for exponential decay
-        assert train_stats["ppo/learning_rate"] > self.ppo_config.learning_rate
+        self.assertTrue(train_stats["ppo/learning_rate"] > self.ppo_config.learning_rate)
 
     def test_ppo_step_with_no_ref(self):
         # initialize dataset
@@ -337,7 +334,6 @@ class PPOTrainerTester(unittest.TestCase):
             tokenizer=self.gpt2_tokenizer,
             dataset=dummy_dataset,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         dummy_dataloader = ppo_trainer.dataloader
         # train model with ppo
         for query_tensor, response_tensor in dummy_dataloader:
@@ -345,15 +341,15 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(0.0)]
             # train model
-            train_stats = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            train_stats = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         for name, param in ppo_trainer.model.named_parameters():
-            assert param.grad is not None, f"Parameter {name} has no gradient"
+            self.assertTrue(param.grad is not None, f"Parameter {name} has no gradient")
 
         # ref model should not be trained
         for name, param in ppo_trainer.ref_model.named_parameters():
-            assert param.grad is None, f"Parameter {name} has a gradient"
+            self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
 
         # initialize a new gpt2 model:
         model = AutoModelForCausalLMWithValueHead.from_pretrained(self.model_id)
@@ -361,9 +357,10 @@ class PPOTrainerTester(unittest.TestCase):
             if "v_head" not in name:
                 name = name.replace("pretrained_model.", "")
 
-                assert torch.allclose(
-                    param.cpu(), model.state_dict()[name].cpu()
-                ), f"Parameter {name} has changed from the original model"
+                self.assertTrue(
+                    torch.allclose(param.cpu(), model.state_dict()[name].cpu()),
+                    f"Parameter {name} has changed from the original model",
+                )
 
         # Finally check stats
         for stat in EXPECTED_STATS:
@@ -388,7 +385,6 @@ class PPOTrainerTester(unittest.TestCase):
             dataset=dummy_dataset,
             num_shared_layers=num_shared_layers,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         dummy_dataloader = ppo_trainer.dataloader
         # train model with ppo
         for query_tensor, response_tensor in dummy_dataloader:
@@ -396,7 +392,7 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(0.0)]
             # train model
-            train_stats = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            train_stats = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         pattern = r".*transformer\.h\.(\d+)\..*"
@@ -406,15 +402,15 @@ class PPOTrainerTester(unittest.TestCase):
             if re.match(pattern, name):
                 layer_number = int(re.match(pattern, name).groups(0)[0])
                 if layer_number < num_shared_layers:
-                    assert param.grad is None, f"Parameter {name} has a gradient"
+                    self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
                 else:
-                    assert param.grad is not None, f"Parameter {name} has no gradient"
-            elif any(layer in name for layer in final_layers):
-                assert param.grad is not None, f"Parameter {name} has no gradient"
+                    self.assertTrue(param.grad is not None, f"Parameter {name} has no gradient")
+            elif any([layer in name for layer in final_layers]):
+                self.assertTrue(param.grad is not None, f"Parameter {name} has no gradient")
 
         # ref model should not be trained
         for name, param in ppo_trainer.ref_model.named_parameters():
-            assert param.grad is None, f"Parameter {name} has a gradient"
+            self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
 
         for stat in EXPECTED_STATS:
             assert stat in train_stats.keys()
@@ -456,7 +452,6 @@ class PPOTrainerTester(unittest.TestCase):
             tokenizer=self.gpt2_tokenizer,
             dataset=dummy_dataset,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         dummy_dataloader = ppo_trainer.dataloader
         # train model with ppo
         for query_tensor, response_tensor in dummy_dataloader:
@@ -464,21 +459,21 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor([[1.0]]), torch.tensor([[0.0]])]
             # train model - this should raise an error
-            with pytest.raises(ValueError):
-                _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            with self.assertRaises(ValueError):
+                _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
 
             reward = [torch.tensor([1.0]), torch.tensor([0.0])]
             # train model - this should work
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         # check if the gradients are computed for the model
         for name, param in ppo_trainer.model.named_parameters():
-            assert param.grad is not None, f"Parameter {name} has no gradient"
+            self.assertTrue(param.grad is not None, f"Parameter {name} has no gradient")
 
         # ref model should not be trained
         for name, param in ppo_trainer.ref_model.named_parameters():
-            assert param.grad is None, f"Parameter {name} has a gradient"
+            self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
 
     def test_ppo_step_input_shape(self):
         """
@@ -494,7 +489,6 @@ class PPOTrainerTester(unittest.TestCase):
             tokenizer=self.gpt2_tokenizer,
             dataset=dummy_dataset,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         dummy_dataloader = ppo_trainer.dataloader
         # train model with ppo
         for query_tensor, response_tensor in dummy_dataloader:
@@ -505,16 +499,16 @@ class PPOTrainerTester(unittest.TestCase):
             bs = ppo_trainer.config.batch_size
 
             queries, responses, _, _ = ppo_trainer._step_safety_checker(
-                bs, list(query_tensor), list(response_tensor), reward
+                bs, [q for q in query_tensor], [r for r in response_tensor], reward
             )
 
-            assert isinstance(queries, list), f"queries should be a list, got {type(queries)}"
-            assert isinstance(responses, list), f"responses should be a list, got {type(responses)}"
+            self.assertTrue(isinstance(queries, list), f"queries should be a list, got {type(queries)}")
+            self.assertTrue(isinstance(responses, list), f"responses should be a list, got {type(responses)}")
 
             # check the shapes
             for i in range(bs):
-                assert queries[i].shape == torch.Size([7])
-                assert responses[i].size() == torch.Size([7])
+                self.assertEqual(queries[i].shape, torch.Size([7]))
+                self.assertEqual(responses[i].size(), torch.Size([7]))
             break
 
     def test_ppo_step_no_dataset(self):
@@ -535,7 +529,6 @@ class PPOTrainerTester(unittest.TestCase):
                 ref_model=self.gpt2_model_ref,
                 tokenizer=self.gpt2_tokenizer,
             )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         # train model with ppo
         reward = [torch.tensor([1.0])]
         # train model - this should work fine
@@ -543,15 +536,15 @@ class PPOTrainerTester(unittest.TestCase):
 
         # check gradients
         for name, param in ppo_trainer.model.named_parameters():
-            assert param.grad is not None, f"Parameter {name} has no gradient"
+            self.assertTrue(param.grad is not None, f"Parameter {name} has no gradient")
 
         # ref model should not be trained
         for name, param in ppo_trainer.ref_model.named_parameters():
-            assert param.grad is None, f"Parameter {name} has a gradient"
+            self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
 
         # check train stats
         for stat in EXPECTED_STATS:
-            assert stat in train_stats, f"Train stats should contain {stat}"
+            self.assertTrue(stat in train_stats, f"Train stats should contain {stat}")
 
     def test_loss_trainer(self):
         """
@@ -586,7 +579,7 @@ class PPOTrainerTester(unittest.TestCase):
         logits = torch.exp(all_logprobs)
         vpreds = values + 0.1
 
-        score, non_score, kls = ppo_trainer.compute_rewards(dummy_scores, all_logprobs, ref_logprobs, mask)
+        score, non_score = ppo_trainer.compute_rewards(dummy_scores, all_logprobs, ref_logprobs, mask)
         values, advantages, returns = ppo_trainer.compute_advantages(values, score, mask)
 
         # just make sure a dummy loss is computed
@@ -602,8 +595,8 @@ class PPOTrainerTester(unittest.TestCase):
             returns[idx].unsqueeze(0),
         )
 
-        assert abs(pg_loss.item() - 2.0494) < 0.0001
-        assert abs(v_loss.item() - 0.0711) < 0.0001
+        self.assertAlmostEqual(pg_loss.item(), 2.2868, 4)
+        self.assertAlmostEqual(v_loss.item(), 0.09950, 4)
 
         # check if we get same results with masked parts removed
         pg_loss_unmasked, v_loss_unmasked, _ = ppo_trainer.loss(
@@ -616,8 +609,8 @@ class PPOTrainerTester(unittest.TestCase):
             apply_mask(advantages[idx], mask[idx]).unsqueeze(0),
             apply_mask(returns[idx], mask[idx]).unsqueeze(0),
         )
-        assert abs(pg_loss_unmasked.item() - 2.0494) < 0.0001
-        assert abs(v_loss_unmasked.item() - 0.0711) < 0.0001
+        self.assertAlmostEqual(pg_loss_unmasked.item(), 2.2868, 4)
+        self.assertAlmostEqual(v_loss_unmasked.item(), 0.09950, 4)
 
     @parameterized.expand(
         [
@@ -681,11 +674,11 @@ class PPOTrainerTester(unittest.TestCase):
             model, dummy_queries, dummy_responses, model_inputs
         )
 
-        assert abs_diff_masked_tensors(logprobs_1, logprobs_2, mask_1, mask_2) <= 0.0001
-        assert abs_diff_masked_tensors(values_1, values_2, mask_1, mask_2) <= 0.0001
+        self.assertLessEqual(abs_diff_masked_tensors(logprobs_1, logprobs_2, mask_1, mask_2), 1e-4)
+        self.assertLessEqual(abs_diff_masked_tensors(values_1, values_2, mask_1, mask_2), 1e-4)
 
-        assert abs_diff_masked_tensors(logprobs_0, logprobs_2[:1], mask_0, mask_2[:1]) <= 0.0001
-        assert abs_diff_masked_tensors(values_0, values_2[:1], mask_0, mask_2[:1]) <= 0.0001
+        self.assertLessEqual(abs_diff_masked_tensors(logprobs_0, logprobs_2[:1], mask_0, mask_2[:1]), 1e-4)
+        self.assertLessEqual(abs_diff_masked_tensors(values_0, values_2[:1], mask_0, mask_2[:1]), 1e-4)
 
     def test_ppo_trainer_max_grad_norm(self):
         """
@@ -702,7 +695,7 @@ class PPOTrainerTester(unittest.TestCase):
             tokenizer=self.gpt2_tokenizer,
             dataset=dummy_dataset,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
+
         dummy_dataloader = ppo_trainer.dataloader
 
         # train model with ppo
@@ -711,15 +704,16 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(0.0)]
             # train model
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         # check gradients
         for name, param in ppo_trainer.model.named_parameters():
-            assert param.grad is not None, f"Parameter {name} has no gradient"
-            assert torch.all(
-                param.grad.abs() <= self.ppo_config.max_grad_norm
-            ), f"Parameter {name} has a gradient larger than max_grad_norm"
+            self.assertTrue(param.grad is not None, f"Parameter {name} has no gradient")
+            self.assertTrue(
+                torch.all(param.grad.abs() <= self.ppo_config.max_grad_norm),
+                f"Parameter {name} has a gradient larger than max_grad_norm",
+            )
 
     def test_ppo_trainer_kl_penalty(self):
         dummy_dataset = self._init_dummy_dataset()
@@ -736,7 +730,7 @@ class PPOTrainerTester(unittest.TestCase):
         )
 
         expected_output = torch.Tensor([[0.1000, -0.1000, 0.1000], [-0.1000, 0.1000, -0.2000]])
-        assert torch.allclose(ppo_trainer._kl_penalty(log_probs, ref_log_probs), expected_output)
+        self.assertTrue(torch.allclose(ppo_trainer._kl_penalty(log_probs, ref_log_probs), expected_output))
 
         self.ppo_config.kl_penalty = "abs"
         ppo_trainer = PPOTrainer(
@@ -748,7 +742,7 @@ class PPOTrainerTester(unittest.TestCase):
         )
 
         expected_output = torch.Tensor([[0.1000, 0.1000, 0.1000], [0.1000, 0.1000, 0.2000]])
-        assert torch.allclose(ppo_trainer._kl_penalty(log_probs, ref_log_probs), expected_output)
+        self.assertTrue(torch.allclose(ppo_trainer._kl_penalty(log_probs, ref_log_probs), expected_output))
 
         self.ppo_config.kl_penalty = "mse"
         ppo_trainer = PPOTrainer(
@@ -760,7 +754,7 @@ class PPOTrainerTester(unittest.TestCase):
         )
 
         expected_output = torch.Tensor([[0.0050, 0.0050, 0.0050], [0.0050, 0.0050, 0.0200]])
-        assert torch.allclose(ppo_trainer._kl_penalty(log_probs, ref_log_probs), expected_output)
+        self.assertTrue(torch.allclose(ppo_trainer._kl_penalty(log_probs, ref_log_probs), expected_output))
 
     def test_ppo_trainer_full_kl_penalty(self):
         # a few more extensive tests for the full kl option as it is more involved
@@ -799,8 +793,8 @@ class PPOTrainerTester(unittest.TestCase):
             [[0.0, 0.0]],
         )
         output = ppo_trainer._kl_penalty(log_probs, ref_log_probs)
-        assert output.shape == (1, 2)
-        assert torch.allclose(output, expected_output)
+        self.assertTrue(output.shape == (1, 2))
+        self.assertTrue(torch.allclose(output, expected_output))
 
         # test for when the two dists are almost not overlapping
         log_probs = torch.Tensor(
@@ -825,8 +819,8 @@ class PPOTrainerTester(unittest.TestCase):
             [[4.4474, 4.4474]],
         )
         output = ppo_trainer._kl_penalty(log_probs, ref_log_probs)
-        assert output.shape == (1, 2)
-        assert torch.allclose(output, expected_output)
+        self.assertTrue(output.shape == (1, 2))
+        self.assertTrue(torch.allclose(output, expected_output))
 
         # test for when the two dists are almost not overlapping
         log_probs = torch.Tensor(
@@ -851,8 +845,8 @@ class PPOTrainerTester(unittest.TestCase):
             [[3.7361, 0.0]],
         )
         output = ppo_trainer._kl_penalty(log_probs, ref_log_probs)
-        assert output.shape == (1, 2)
-        assert torch.allclose(output, expected_output, atol=0.0001)
+        self.assertTrue(output.shape == (1, 2))
+        self.assertTrue(torch.allclose(output, expected_output, atol=1e-4))
 
     @require_peft
     @mark.peft_test
@@ -889,8 +883,8 @@ class PPOTrainerTester(unittest.TestCase):
             tokenizer=self.gpt2_tokenizer,
             dataset=dummy_dataset,
         )
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
-        assert ppo_trainer.ref_model is None
+
+        self.assertTrue(ppo_trainer.ref_model is None)
 
         dummy_dataloader = ppo_trainer.dataloader
 
@@ -900,19 +894,19 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(0.0)]
             # train model by running a step twice
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
 
             ppo_trainer.model.train()
             ppo_trainer.model.gradient_checkpointing_enable()
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         # check gradients
         for name, param in model.named_parameters():
             if "lora" in name or "v_head" in name:
-                assert param.grad is not None, f"Parameter {name} has a no gradient"
+                self.assertTrue(param.grad is not None, f"Parameter {name} has a no gradient")
             else:
-                assert param.grad is None, f"Parameter {name} has a gradient"
+                self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
 
     @require_peft
     @mark.peft_test
@@ -977,8 +971,8 @@ class PPOTrainerTester(unittest.TestCase):
                 tokenizer=self.gpt2_tokenizer,
                 dataset=dummy_dataset,
             )
-            ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
-            assert ppo_trainer.ref_model is None
+
+            self.assertTrue(ppo_trainer.ref_model is None)
 
             dummy_dataloader = ppo_trainer.dataloader
 
@@ -988,23 +982,23 @@ class PPOTrainerTester(unittest.TestCase):
                 # (this could be any reward such as human feedback or output from another model)
                 reward = [torch.tensor(1.0), torch.tensor(0.0)]
                 # train model by running a step twice
-                _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+                _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
 
                 ppo_trainer.model.train()
                 ppo_trainer.model.gradient_checkpointing_enable()
-                _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+                _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
                 break
 
             new_logits = ppo_trainer.model.compute_reward_score(dummy_inputs)
-            assert not torch.allclose(previous_rm_logits, new_logits[:, -1, :])
-            assert torch.allclose(original_rm_logits, new_logits[:, -1, :])
+            self.assertTrue(not torch.allclose(previous_rm_logits, new_logits[:, -1, :]))
+            self.assertTrue(torch.allclose(original_rm_logits, new_logits[:, -1, :]))
 
             # check gradients
             for name, param in model.named_parameters():
                 if ("lora" in name or "v_head" in name) and ("reward" not in name):
-                    assert param.grad is not None, f"Parameter {name} has a no gradient"
+                    self.assertTrue(param.grad is not None, f"Parameter {name} has a no gradient")
                 else:
-                    assert param.grad is None, f"Parameter {name} has a gradient"
+                    self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
 
     @unittest.skip("Fix by either patching `whomai()` to work in the staging endpoint or use a dummy prod user.")
     def test_push_to_hub(self):
@@ -1022,10 +1016,10 @@ class PPOTrainerTester(unittest.TestCase):
             url = ppo_trainer.push_to_hub(repo_id=repo_id, token=self._token, api_endpoint=CI_HUB_ENDPOINT)
             # Extract repo_name from the url
             re_search = re.search(CI_HUB_ENDPOINT + r"/([^/]+/[^/]+)/", url)
-            assert re_search is not None
+            self.assertTrue(re_search is not None)
             hub_repo_id = re_search.groups()[0]
             # Check we created a Hub repo
-            assert hub_repo_id == repo_id
+            self.assertEqual(hub_repo_id, repo_id)
             # Ensure all files are present
             files = sorted(self._api.list_repo_files(hub_repo_id))
             assert all(
@@ -1063,7 +1057,7 @@ class PPOTrainerTester(unittest.TestCase):
             "gpt2", device_map="balanced", max_memory={0: "500MB", 1: "500MB"}
         )
 
-        assert set(gpt2_model.hf_device_map.values()) == {0, 1}
+        self.assertTrue(set(gpt2_model.hf_device_map.values()) == {0, 1})
 
         # this line is very important
         def make_inputs_require_grad(module, input, output):
@@ -1074,7 +1068,7 @@ class PPOTrainerTester(unittest.TestCase):
         peft_model = get_peft_model(gpt2_model, lora_config)
         model = AutoModelForCausalLMWithValueHead.from_pretrained(peft_model)
 
-        assert model.is_sequential_parallel
+        self.assertTrue(model.is_sequential_parallel)
 
         dummy_dataset = self._init_dummy_dataset()
         self.ppo_config.batch_size = 2
@@ -1088,7 +1082,7 @@ class PPOTrainerTester(unittest.TestCase):
             dataset=dummy_dataset,
         )
 
-        assert ppo_trainer.ref_model is None
+        self.assertTrue(ppo_trainer.ref_model is None)
 
         dummy_dataloader = ppo_trainer.dataloader
 
@@ -1098,19 +1092,19 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(0.0)]
             # train model by running a step twice
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
 
             ppo_trainer.model.train()
             ppo_trainer.model.gradient_checkpointing_enable()
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         # check gradients
         for name, param in model.named_parameters():
             if "lora" in name or "v_head" in name:
-                assert param.grad is not None, f"Parameter {name} has a no gradient"
+                self.assertTrue(param.grad is not None, f"Parameter {name} has a no gradient")
             else:
-                assert param.grad is None, f"Parameter {name} has a gradient"
+                self.assertTrue(param.grad is None, f"Parameter {name} has a gradient")
 
     def test_generation(self):
         dummy_dataset = self._init_dummy_dataset()
@@ -1140,56 +1134,7 @@ class PPOTrainerTester(unittest.TestCase):
         generations_single = [ppo_trainer.generate(inputs, **generation_kwargs).squeeze() for inputs in model_inputs]
         generations_single = tokenizer.batch_decode(generations_single)
 
-        assert generations_single == generations_batched
-
-    def test_generation_with_ref_model(self):
-        dummy_dataset = self._init_dummy_dataset()
-        model = AutoModelForCausalLMWithValueHead.from_pretrained("gpt2")
-        tokenizer = AutoTokenizer.from_pretrained("gpt2")
-
-        # Negate the weights in the last layer of the ref model so it never
-        # outputs the same things as the primary model
-        ref_model = copy.deepcopy(model)
-        lm_head_weight = ref_model.pretrained_model.lm_head.weight
-        lm_head_weight.data = -lm_head_weight.data
-
-        ppo_trainer = PPOTrainer(
-            config=self.ppo_config,
-            model=model,
-            ref_model=ref_model,
-            tokenizer=tokenizer,
-            dataset=dummy_dataset,
-        )
-
-        input_texts = ["this is a test", "this is another, longer test"]
-
-        generation_kwargs = {"do_sample": False, "max_new_tokens": 4, "pad_token_id": tokenizer.eos_token_id}
-
-        tokenizer.pad_token = tokenizer.eos_token
-
-        model_inputs = [tokenizer(txt, return_tensors="pt").input_ids.squeeze() for txt in input_texts]
-
-        generations_batched, ref_generations_batched = ppo_trainer.generate(
-            model_inputs, batch_size=2, generate_ref_response=True, **generation_kwargs
-        )
-        generations_batched = tokenizer.batch_decode(generations_batched)
-        ref_generations_batched = tokenizer.batch_decode(ref_generations_batched)
-
-        generations_single = []
-        ref_generations_single = []
-        for inputs in model_inputs:
-            generation, ref_generation = ppo_trainer.generate(inputs, generate_ref_response=True, **generation_kwargs)
-            generations_single.append(generation.squeeze())
-            ref_generations_single.append(ref_generation.squeeze())
-
-        generations_single = tokenizer.batch_decode(generations_single)
-        ref_generations_single = tokenizer.batch_decode(ref_generations_single)
-
-        assert generations_single == generations_batched
-        assert ref_generations_single == ref_generations_batched
-
-        assert generations_batched != ref_generations_batched
-        assert generations_single != ref_generations_single
+        self.assertEqual(generations_single, generations_batched)
 
     def test_grad_accumulation(self):
         dummy_dataset = self._init_dummy_dataset()
@@ -1217,7 +1162,7 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(1.0)]
             # train model by running a step twice
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         model_grad = gpt2_model.v_head.summary.weight
@@ -1241,11 +1186,11 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(1.0)]
             # train model by running a step twice
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
         model_grad_acc = gpt2_model_clone.v_head.summary.weight
-        assert torch.allclose(model_grad_acc, model_grad, rtol=0.001, atol=0.001)
+        self.assertTrue(torch.allclose(model_grad_acc, model_grad, rtol=1e-3, atol=1e-3))
 
     @unittest.skip("Fix by either patching `whomai()` to work in the staging endpoint or use a dummy prod user.")
     def test_push_to_hub_if_best_reward(self):
@@ -1272,7 +1217,6 @@ class PPOTrainerTester(unittest.TestCase):
             dataset=dummy_dataset,
         )
 
-        ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
         dummy_dataloader = ppo_trainer.dataloader
         # train model with ppo
         for query_tensor, response_tensor in dummy_dataloader:
@@ -1280,7 +1224,7 @@ class PPOTrainerTester(unittest.TestCase):
             # (this could be any reward such as human feedback or output from another model)
             reward = [torch.tensor(1.0), torch.tensor(0.0)]
             # train model
-            _ = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+            _ = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
             break
 
     def test_batch_size_check(self):

@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=trl
-#SBATCH --partition=hopper-cpu
+#SBATCH --partition=production-cluster
 #SBATCH --ntasks=1
 #SBATCH --output=slurm/logs/%x_%j.out
 

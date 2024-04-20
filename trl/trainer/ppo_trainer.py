@@ -25,7 +25,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from accelerate.utils import ProjectConfiguration, gather_object, is_deepspeed_available
+from accelerate.utils import ProjectConfiguration, is_deepspeed_available
 from datasets import Dataset
 from huggingface_hub import whoami
 from packaging import version
@@ -52,13 +52,8 @@ from ..core import (
     stack_dicts,
     stats_to_np,
 )
-from ..import_utils import is_npu_available, is_torch_greater_2_0, is_xpu_available
-from ..models import (
-    SUPPORTED_ARCHITECTURES,
-    PreTrainedModelWrapper,
-    create_reference_model,
-    unwrap_model_for_generation,
-)
+from ..import_utils import is_torch_greater_2_0, is_xpu_available
+from ..models import SUPPORTED_ARCHITECTURES, PreTrainedModelWrapper, create_reference_model
 from . import AdaptiveKLController, BaseTrainer, FixedKLController, PPOConfig, RunningMoments
 
 
@@ -69,7 +64,6 @@ MODEL_CARD_TEMPLATE = """---
 license: apache-2.0
 tags:
 - trl
-- ppo
 - transformers
 - reinforcement-learning
 ---
@@ -143,14 +137,12 @@ class PPOTrainer(BaseTrainer):
         **lr_scheduler** (`torch.optim.lr_scheduler`, *optional*) -- Learning rate scheduler to be used for training.
     """
 
-    _tag_names = ["trl", "ppo"]
-
     def __init__(
         self,
-        config: Optional[PPOConfig] = None,
-        model: Optional[PreTrainedModelWrapper] = None,
+        config: PPOConfig = None,
+        model: PreTrainedModelWrapper = None,
         ref_model: Optional[PreTrainedModelWrapper] = None,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        tokenizer: PreTrainedTokenizerBase = None,
         dataset: Optional[Union[torch.utils.data.Dataset, Dataset]] = None,
         optimizer: Optional[torch.optim.Optimizer] = None,
         data_collator: Optional[typing.Callable] = None,
@@ -195,10 +187,10 @@ class PPOTrainer(BaseTrainer):
             raise ValueError(
                 f"tokenizer must be a PreTrainedTokenizerBase like a PreTrainedTokenizer or a PreTrainedTokenizerFast, got {type(tokenizer)}"
             )
-        if not isinstance(model, (SUPPORTED_ARCHITECTURES)):
-            raise ValueError(
-                f"model must be a PreTrainedModelWrapper, got {type(model)} - supported architectures are: {SUPPORTED_ARCHITECTURES}"
-            )
+        # if not isinstance(model, (SUPPORTED_ARCHITECTURES)):
+        #     raise ValueError(
+        #         f"model must be a PreTrainedModelWrapper, got {type(model)} - supported architectures are: {SUPPORTED_ARCHITECTURES}"
+        #     )
         # Step 1: Initialize Accelerator
         self.accelerator = Accelerator(
             log_with=config.log_with,
@@ -338,7 +330,7 @@ class PPOTrainer(BaseTrainer):
         # In a distributed setup, only logging needs to be performed on the main process
         # check: https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html
         # or: https://discuss.pytorch.org/t/use-distributed-data-parallel-correctly/82500/11
-        self.is_distributed = self.accelerator.num_processes > 1
+        self.is_distributed = self.accelerator.distributed_type == "MULTI_GPU"
 
         # init the current step
         self.current_step = 0
@@ -357,8 +349,6 @@ class PPOTrainer(BaseTrainer):
         else:
             if is_xpu_available():
                 self.current_device = torch.device("xpu:0")
-            elif is_npu_available():
-                self.current_device = torch.device("npu:0")
             else:
                 self.current_device = torch.device("cuda:0")
 
@@ -436,7 +426,7 @@ class PPOTrainer(BaseTrainer):
     def generate(
         self,
         query_tensor: Union[torch.Tensor, List[torch.Tensor]],
-        length_sampler: Optional[Callable] = None,
+        length_sampler: Callable = None,
         batch_size: int = 4,
         return_prompt: bool = True,
         generate_ref_response: bool = False,
@@ -449,6 +439,8 @@ class PPOTrainer(BaseTrainer):
         Args:
             query_tensor (`torch.LongTensor`):
                 A tensor of shape (`seq_len`) containing query tokens or a list of tensors of shape (`seq_len`).
+            generation_kwargs (dict[str, Any]):
+                Keyword arguments for generation.
             length_sampler (`Callable`, *optional*):
                 Callable that returns the number of newly generated tokens.
             batch_size (`int`, *optional):
@@ -457,8 +449,6 @@ class PPOTrainer(BaseTrainer):
                 If set to `False` the prompt is not returned but only the newly generated tokens, defaults to `True`.
             generate_ref_response (`bool`, *optional*):
                 If set to `True` the reference response is also generated, defaults to `False`.
-            generation_kwargs (dict[str, Any]):
-                Keyword arguments for generation.
 
         Returns:
             `torch.LongTensor`: A tensor of shape (`batch_size`, `gen_len`) containing response tokens.
@@ -475,14 +465,15 @@ class PPOTrainer(BaseTrainer):
                 **generation_kwargs,
             )
             if generate_ref_response:
-                ref_response = self._generate_batched(
-                    ref_model,
-                    query_tensor,
-                    length_sampler=length_sampler,
-                    batch_size=batch_size,
-                    return_prompt=return_prompt,
-                    **generation_kwargs,
-                )
+                with self.optional_peft_ctx():
+                    ref_response = self._generate_batched(
+                        ref_model,
+                        query_tensor,
+                        length_sampler=length_sampler,
+                        batch_size=batch_size,
+                        return_prompt=return_prompt,
+                        **generation_kwargs,
+                    )
 
         else:
             if len(query_tensor.shape) == 2:
@@ -492,17 +483,12 @@ class PPOTrainer(BaseTrainer):
 
             if length_sampler is not None:
                 generation_kwargs["max_new_tokens"] = length_sampler()
-
-            with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
-                response = unwrapped_model.generate(input_ids=query_tensor.unsqueeze(dim=0), **generation_kwargs)
-
+            response = self.accelerator.unwrap_model(self.model).generate(
+                input_ids=query_tensor.unsqueeze(dim=0), **generation_kwargs
+            )
             if generate_ref_response:
-                with unwrap_model_for_generation(
-                    ref_model, self.accelerator, is_peft_model=self.is_peft_model
-                ) as unwrapped_model:
-                    ref_response = unwrapped_model.generate(
-                        input_ids=query_tensor.unsqueeze(dim=0), **generation_kwargs
-                    )
+                with self.optional_peft_ctx():
+                    ref_response = ref_model.generate(input_ids=query_tensor.unsqueeze(dim=0), **generation_kwargs)
 
             if not return_prompt and not self.is_encoder_decoder:
                 response = response[:, query_tensor.shape[0] :]
@@ -517,10 +503,10 @@ class PPOTrainer(BaseTrainer):
         self,
         model: PreTrainedModelWrapper,
         query_tensors: List[torch.Tensor],
-        length_sampler: Optional[Callable] = None,
+        length_sampler: Callable = None,
         batch_size: int = 4,
         return_prompt: bool = True,
-        pad_to_multiple_of: Optional[int] = None,
+        pad_to_multiple_of: int = None,
         remove_padding: bool = True,
         **generation_kwargs,
     ):
@@ -552,9 +538,8 @@ class PPOTrainer(BaseTrainer):
                 return_tensors="pt",
             ).to(self.current_device)
 
-            with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
-                generations = unwrapped_model.generate(**padded_inputs, **generation_kwargs)
-
+            generations = self.accelerator.unwrap_model(model).generate(**padded_inputs, **generation_kwargs)
+            # TODO: remove prompts and paddings
             for generation, mask in zip(generations, padded_inputs["attention_mask"]):
                 if not self.is_encoder_decoder:
                     output = generation[(1 - mask).sum() :]  # remove padding
@@ -685,6 +670,7 @@ class PPOTrainer(BaseTrainer):
 
         t = time.time()
 
+        # TODO 
         model_inputs = self.prepare_model_inputs(queries, responses)
 
         if self.is_distributed:
@@ -743,11 +729,11 @@ class PPOTrainer(BaseTrainer):
                 active_full_logprobs = logprobs_from_logits(logits_or_none, None, gather=False)
                 ref_full_logprobs = logprobs_from_logits(ref_logits_or_none, None, gather=False)
 
-                rewards, non_score_reward, kls = self.compute_rewards(
+                rewards, non_score_reward = self.compute_rewards(
                     scores, active_full_logprobs, ref_full_logprobs, masks
                 )
             else:
-                rewards, non_score_reward, kls = self.compute_rewards(scores, all_logprobs, ref_logprobs, masks)
+                rewards, non_score_reward = self.compute_rewards(scores, all_logprobs, ref_logprobs, masks)
             timing["time/ppo/compute_rewards"] = time.time() - t
 
             t = time.time()
@@ -841,7 +827,6 @@ class PPOTrainer(BaseTrainer):
             masks=masks,
             queries=queries,
             responses=responses,
-            kls=kls,
         )
         # Gather/Reduce stats from all processes
         if self.is_distributed:
@@ -1056,15 +1041,15 @@ class PPOTrainer(BaseTrainer):
 
         Args:
             logprobs (`torch.FloatTensor`):
-                Log probabilities of the model, shape [mini_batch_size, response_length]
+                Log probabilities of the model, shape [batch_size, response_length]
             values (`torch.FloatTensor`):
-                Values of the value head, shape [mini_batch_size, response_length]
+                Values of the value head, shape [batch_size, response_length]
             query (`torch.LongTensor`):
-                Encoded queries, shape [mini_batch_size, query_length]
+                Encoded queries, shape [batch_size, query_length]
             response (`torch.LongTensor`):
-                Encoded responses, shape [mini_batch_size, response_length]
+                Encoded responses, shape [batch_size, response_length]
             model_input (`torch.LongTensor`):
-                Concatenated queries and responses, shape [mini_batch_size, query_length+response_length]
+                Concatenated queries and responses, shape [batch_size, query_length+response_length]
 
         Returns:
             train_stats (dict[str, `torch.Tensor`]):
@@ -1085,6 +1070,39 @@ class PPOTrainer(BaseTrainer):
         self.optimizer.zero_grad()
         return train_stats
 
+    @PPODecorators.empty_device_cache()
+    def compute_reward_model_score(
+        self, input_ids: torch.FloatTensor, attention_mask: torch.FloatTensor = None, **kwargs
+    ):
+        r"""
+        Computes the reward score for a given input for a model with a reward modelling adapter. The method has first to enable the adapter
+        and then compute the reward score. After that the model disables the reward modeling
+        adapter and enables the default ppo adapter again.
+        """
+        unwrap_model = self.accelerator.unwrap_model(self.model)
+        if not unwrap_model.supports_rm_adapter:
+            raise ValueError(
+                "This model does not support reward modeling adapter, you must compute reward scores with another method."
+            )
+
+        # enable rm adapter
+        unwrap_model.pretrained_model.set_adapter(unwrap_model.rm_adapter_name)
+        # TODO check
+        # self.model.eval()
+
+        with torch.no_grad():
+            _, _, scores = self.model(
+                use_score=True,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **kwargs,
+            )
+
+        unwrap_model.pretrained_model.set_adapter(unwrap_model.policy_adapter_name)
+        # self.model.train()
+
+        return scores
+
     def compute_rewards(
         self,
         scores: torch.FloatTensor,
@@ -1102,17 +1120,11 @@ class PPOTrainer(BaseTrainer):
                 Log probabilities of the model, shape (`batch_size`, `response_length`)
             ref_logprobs (`torch.FloatTensor`):
                 Log probabilities of the reference model, shape (`batch_size`, `response_length`)
-
-        Returns:
-            `torch.FloatTensor`: Per token rewards, shape (`batch_size`, `response_length`)
-            `torch.FloatTensor`: Non score rewards, shape (`batch_size`, `response_length`)
-            `torch.FloatTensor`: KL penalty, shape (`batch_size`, `response_length`)
         """
-        rewards, non_score_rewards, kls = [], [], []
+        rewards, non_score_rewards = [], []
         for score, logprob, ref_logprob, mask in zip(scores, logprobs, ref_logprobs, masks):
             # compute KL penalty (from difference in logprobs)
             kl = self._kl_penalty(logprob, ref_logprob)
-            kls.append(kl)
             non_score_reward = -self.kl_ctl.value * kl
             non_score_rewards.append(non_score_reward)
             reward = non_score_reward.clone()
@@ -1121,7 +1133,7 @@ class PPOTrainer(BaseTrainer):
             # reward is preference model score + KL penalty
             reward[last_non_masked_index] += score
             rewards.append(reward)
-        return torch.stack(rewards), torch.stack(non_score_rewards), torch.stack(kls)
+        return torch.stack(rewards), torch.stack(non_score_rewards)
 
     def _kl_penalty(self, logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor) -> torch.FloatTensor:
         if self.config.kl_penalty == "kl":
@@ -1273,8 +1285,7 @@ class PPOTrainer(BaseTrainer):
         """
         mask = data.pop("masks")
 
-        kls = data.pop("kls")
-        kl_list = ((kls) * mask).sum(axis=-1)
+        kl_list = ((data["logprobs"] - data["ref_logprobs"]) * mask).sum(axis=-1)
         mean_kl = kl_list.mean()
         mean_entropy = (-data["logprobs"] * mask).sum(axis=-1).mean()
 
@@ -1325,7 +1336,8 @@ class PPOTrainer(BaseTrainer):
         stats: dict,
         batch: dict,
         rewards: List[torch.FloatTensor],
-        columns_to_log: typing.Iterable[str] = ("query", "response"),
+        gold_rewards: List[torch.FloatTensor] = None,
+        columns_to_log: List[str] = ["query", "response"],
     ):
         """
         A function that logs all the training stats. Call it at the end of each epoch.
@@ -1338,31 +1350,14 @@ class PPOTrainer(BaseTrainer):
             rewards (`List[torch.FloatTensor]`):
                 A tensor of rewards.
         """
-
-        # all gather stats
-        if not isinstance(rewards, torch.Tensor):
-            rewards = torch.tensor(rewards).to(self.current_device)
-        rewards = self.accelerator.gather(rewards).flatten()
-
-        if self.config.log_with == "wandb":
-            import wandb
-
-            if any(column_to_log not in batch.keys() for column_to_log in columns_to_log):
-                raise ValueError(f"Columns to log {columns_to_log} are not present in the batch {batch.keys()}.")
-
-            batch_list = [batch[column_to_log] for column_to_log in columns_to_log]
-            if self.is_distributed:
-                gathered_batch_list = []
-                for b in batch_list:
-                    flattened = gather_object(b)
-                    gathered_batch_list.append(flattened)
-                batch_list = gathered_batch_list
-
         # Log only if we are in the main process
         if self.accelerator.is_main_process:
             logs = {}
 
             # Log stats
+            if not isinstance(rewards, torch.Tensor):
+                rewards = torch.tensor(rewards).to(self.current_device)
+
             if "query" not in batch.keys() and "response" not in batch.keys():
                 # warn the user that the game logs will not be logged
                 warnings.warn(
@@ -1370,8 +1365,23 @@ class PPOTrainer(BaseTrainer):
                     "'response'. "
                 )
             elif self.config.log_with == "wandb":
+                import wandb
+
+                if any([column_to_log not in batch.keys() for column_to_log in columns_to_log]):
+                    raise ValueError(f"Columns to log {columns_to_log} are not present in the batch {batch.keys()}.")
+
+                batch_list = [batch[column_to_log] for column_to_log in columns_to_log]
+
                 table_rows = [list(r) for r in zip(*batch_list, rewards.cpu().tolist())]
                 logs.update({"game_log": wandb.Table(columns=[*columns_to_log, "reward"], rows=table_rows)})
+            # All reduce rewards if distributed
+            if self.is_distributed:
+                import torch.distributed as dist
+
+                dist.barrier()
+
+                dist.all_reduce(rewards, op=torch.distributed.ReduceOp.SUM)
+                rewards /= self.accelerator.num_processes
 
             logs.update(stats)
 
@@ -1384,6 +1394,15 @@ class PPOTrainer(BaseTrainer):
             logs["env/reward_std"] = torch.std(rewards).cpu().numpy().item()
             logs["env/reward_dist"] = rewards.cpu().numpy()
 
+            # gold reward stuff
+            if gold_rewards is not None:
+                if not isinstance(gold_rewards, torch.Tensor):
+                    gold_rewards = torch.tensor(gold_rewards).to(self.current_device)
+
+                logs["eval/gold_reward_mean"] = torch.mean(gold_rewards).cpu().numpy().item()
+                logs["eval/gold_reward_std"] = torch.std(gold_rewards).cpu().numpy().item()
+                logs["eval/gold_reward_dist"] = gold_rewards.cpu().numpy()
+
             if self.config.log_with == "tensorboard":
                 # update the current step
                 self.current_step += 1
@@ -1392,6 +1411,16 @@ class PPOTrainer(BaseTrainer):
                 logs,
                 step=self.current_step if self.config.log_with == "tensorboard" else None,
             )
+
+        else:
+            if self.is_distributed:
+                import torch.distributed as dist
+
+                if not isinstance(rewards, torch.Tensor):
+                    rewards = torch.tensor(rewards).to(self.current_device)
+
+                dist.barrier()
+                dist.all_reduce(rewards, op=torch.distributed.ReduceOp.SUM)
 
     def create_model_card(self, path: str, model_name: Optional[str] = "TRL Model") -> None:
         """Creates and saves a model card for a TRL model.
@@ -1403,7 +1432,7 @@ class PPOTrainer(BaseTrainer):
         try:
             user = whoami()["name"]
         # handle the offline case
-        except Exception:
+        except:  # noqa
             warnings.warn("Cannot retrieve user information assuming you are running in offline mode.")
             return
 
@@ -1425,7 +1454,7 @@ class PPOTrainer(BaseTrainer):
 
         text = Text()
 
-        for _i, (token, mask) in enumerate(zip(tokens, masks)):
+        for i, (token, mask) in enumerate(zip(tokens, masks)):
             if mask == 1:
                 text.append(self.tokenizer.decode(token.item()), style="black on deep_sky_blue1")
                 text.append(" ")

@@ -46,16 +46,16 @@ class PPOConfig:
     """Log with either 'wandb' or 'tensorboard', check  https://huggingface.co/docs/accelerate/usage_guides/tracking for more details"""
     task_name: Optional[str] = None
     """Name of task to use - used only for tracking purposes"""
-    model_name: Optional[str] = "gpt2"
+    model_name: Optional[str] = None
     """Name of model to use - used only for tracking purposes"""
-    query_dataset: Optional[str] = "imdb"
+    query_dataset: Optional[str] = None
     """Name of dataset to query - used only for tracking purposes"""
-    reward_model: Optional[str] = "sentiment-analysis:lvwerra/distilbert-imdb"
+    reward_model: Optional[str] = None
     """The reward model to use - used only for tracking purposes"""
     remove_unused_columns: bool = True
     """Remove unused columns from the dataset if `datasets.Dataset` is used"""
     tracker_kwargs: JSONDict = field(default_factory=dict)
-    """Keyword arguments for the tracker (e.g. python ppo.py --tracker_kwargs='{"wandb": {"entity": "my_wandb_entity", "name": "my_exp_name"}}'"""
+    """Keyword arguments for the tracker (e.g. python ppo.py --ppo_config.tracker_kwargs='{"wandb": {"entity": "my_wandb_entity", "name": "my_exp_name"}}'"""
     accelerator_kwargs: JSONDict = field(default_factory=dict)
     """Keyword arguments for the accelerator"""
     project_kwargs: JSONDict = field(default_factory=dict)
@@ -68,10 +68,16 @@ class PPOConfig:
     # hyperparameters
     steps: int = 20000
     """Number of training steps"""
-    learning_rate: float = 1.41e-5
+    learning_rate: float = 1e-5
     """Adam learning rate"""
+    label_pad_token_id: int = -100
+    """Label padding token id"""
+    padding_value: int = 0
+    """Padding value"""
     adap_kl_ctrl: bool = True
     """Use adaptive KL control, otherwise linear"""
+    dtype: Literal["torch.bfloat16", "torch.float16", "torch.float32"] = "torch.float32"
+    """Data type for model weights"""
     init_kl_coef: Optional[float] = 0.2
     """Initial KL penalty coefficient (used for adaptive and linear control)"""
     kl_penalty: Literal["kl", "abs", "mse", "full"] = "kl"
@@ -90,11 +96,11 @@ class PPOConfig:
     """Range for clipping values in loss calculation"""
     vf_coef: float = 0.1
     """Scaling factor for value loss"""
-    batch_size: int = 128
+    batch_size: int = 256
     """Number of samples per optimisation step"""
     forward_batch_size: Optional[int] = None
     """DEPRECATED: use `mini_batch_size` instead, which does the same thing."""
-    mini_batch_size: int = 128
+    mini_batch_size: int = 1
     """Number of samples optimized in each mini batch"""
     gradient_accumulation_steps: int = 1
     """The number of gradient accumulation steps"""
@@ -102,6 +108,12 @@ class PPOConfig:
     """The world size for distributed training"""
     ppo_epochs: int = 4
     """Number of optimisation epochs per batch of samples"""
+    max_length: Optional[int] = None
+    """Maximum length of the sequences"""
+    max_prompt_length: Optional[int] = None
+    """Maximum length of the prompt sequences"""
+    max_target_length: Optional[int] = None
+    """Maximum length of the target sequences only with encode decode model"""
     max_grad_norm: Optional[float] = None
     """Maximum gradient norm for gradient clipping"""
     optimize_cuda_cache: Optional[bool] = None
@@ -125,6 +137,16 @@ class PPOConfig:
     whiten_rewards: bool = False
     """Whiten the rewards before compute advantages"""
 
+    # cpo
+    rep_approach: Optional[str] = "mean" 
+    """rep approach"""
+    response_only: Optional[bool] = True 
+    """n steps to save the model"""
+    similarity: Optional[str] = "dot" 
+    """how to compute the similarty"""
+    loss_type: Optional[str] = "sigmoid" 
+    """how to compute the loss function"""
+
     # computed hyperparameters at runtime; we use `tyro.conf.Suppress` to hide them from the help text
     is_encoder_decoder: Optional[tyro.conf.Suppress[bool]] = None
     """TO BE FILLED In RUNTIME: Whether the model is an encoder-decoder model"""
@@ -137,9 +159,10 @@ class PPOConfig:
     global_batch_size: tyro.conf.Suppress[int] = None
     """TO BE FILLED In RUNTIME: the effective `batch_size` across all processes"""
 
+
     if optimize_cuda_cache is not None:
         warnings.warn(
-            "The `optimize_cuda_cache` argument will be deprecated soon, please use `optimize_device_cache` instead."
+            "The `optimize_cuda_cache` arguement will be deprecated soon, please use `optimize_device_cache` instead."
         )
         optimize_device_cache = optimize_cuda_cache
     else:

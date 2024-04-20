@@ -15,14 +15,7 @@ import unittest
 
 import torch
 
-from trl import (
-    is_bitsandbytes_available,
-    is_diffusers_available,
-    is_peft_available,
-    is_pil_available,
-    is_wandb_available,
-    is_xpu_available,
-)
+from trl import is_peft_available, is_wandb_available, is_xpu_available
 
 
 def require_peft(test_case):
@@ -31,33 +24,6 @@ def require_peft(test_case):
     """
     if not is_peft_available():
         test_case = unittest.skip("test requires peft")(test_case)
-    return test_case
-
-
-def require_bitsandbytes(test_case):
-    """
-    Decorator marking a test that requires bnb. Skips the test if bnb is not available.
-    """
-    if not is_bitsandbytes_available():
-        test_case = unittest.skip("test requires bnb")(test_case)
-    return test_case
-
-
-def require_diffusers(test_case):
-    """
-    Decorator marking a test that requires diffusers. Skips the test if diffusers is not available.
-    """
-    if not is_diffusers_available():
-        test_case = unittest.skip("test requires diffusers")(test_case)
-    return test_case
-
-
-def requires_pil(test_case):
-    """
-    Decorator marking a test that requires PIL. Skips the test if pil is not available.
-    """
-    if not is_pil_available():
-        test_case = unittest.skip("test requires PIL")(test_case)
     return test_case
 
 
@@ -80,21 +46,23 @@ def require_no_wandb(test_case):
     return require_wandb(test_case, required=False)
 
 
+def require_bitsandbytes(test_case):
+    """
+    Decorator marking a test that requires bitsandbytes. Skips the test if bitsandbytes is not available.
+    """
+    try:
+        import bitsandbytes  # noqa: F401
+    except ImportError:
+        test_case = unittest.skip("test requires bitsandbytes")(test_case)
+    return test_case
+
+
 def require_torch_multi_gpu(test_case):
     """
     Decorator marking a test that requires multiple GPUs. Skips the test if there aren't enough GPUs.
     """
     if torch.cuda.device_count() < 2:
         test_case = unittest.skip("test requires multiple GPUs")(test_case)
-    return test_case
-
-
-def require_torch_gpu(test_case):
-    """
-    Decorator marking a test that requires GPUs. Skips the test if there is no GPU.
-    """
-    if not torch.cuda.is_available():
-        test_case = unittest.skip("test requires GPU")(test_case)
     return test_case
 
 

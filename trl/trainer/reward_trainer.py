@@ -25,8 +25,8 @@ from transformers.trainer_pt_utils import nested_detach
 from transformers.trainer_utils import EvalPrediction
 
 from ..import_utils import is_peft_available
-from .reward_config import RewardConfig
-from .utils import RewardDataCollatorWithPadding, compute_accuracy
+from .training_configs import RewardConfig
+from .utils import PeftSavingCallback, RewardDataCollatorWithPadding, compute_accuracy
 
 
 if is_peft_available():
@@ -53,11 +53,9 @@ class RewardTrainer(Trainer):
     If you don't pass a margin, no margin will be used.
     """
 
-    _tag_names = ["trl", "reward-trainer"]
-
     def __init__(
         self,
-        model: Optional[Union[PreTrainedModel, nn.Module]] = None,
+        model: Union[PreTrainedModel, nn.Module] = None,
         args: Optional[RewardConfig] = None,
         data_collator: Optional[DataCollator] = None,
         train_dataset: Optional[Dataset] = None,
@@ -101,8 +99,6 @@ class RewardTrainer(Trainer):
                 The optimizer and scheduler to use for training.
             preprocess_logits_for_metrics (`Callable[[torch.Tensor, torch.Tensor], torch.Tensor]`):
                 The function to use to preprocess the logits before computing the metrics.
-            max_length (`int`, defaults to `None`):
-                The maximum length of the sequences in the batch. This argument is required if you want to use the default data collator.
             peft_config (`Dict`, defaults to `None`):
                 The PEFT configuration to use for training. If you pass a PEFT configuration, the model will be wrapped in a PEFT model.
         """
@@ -137,7 +133,7 @@ class RewardTrainer(Trainer):
                         inspect.signature(prepare_model_for_kbit_training).parameters
                     )
 
-                    prepare_model_kwargs = {"use_gradient_checkpointing": args.gradient_checkpointing}
+                    preprare_model_kwargs = {"use_gradient_checkpointing": args.gradient_checkpointing}
 
                     if not _supports_gc_kwargs and args.gradient_checkpointing_kwargs is not None:
                         warnings.warn(
@@ -145,11 +141,17 @@ class RewardTrainer(Trainer):
                             "please update to the latest version of peft to use `gradient_checkpointing_kwargs`."
                         )
                     elif _supports_gc_kwargs and args.gradient_checkpointing_kwargs is not None:
-                        prepare_model_kwargs["gradient_checkpointing_kwargs"] = args.gradient_checkpointing_kwargs
+                        preprare_model_kwargs["gradient_checkpointing_kwargs"] = args.gradient_checkpointing_kwargs
 
-                    model = prepare_model_for_kbit_training(model, **prepare_model_kwargs)
+                    model = prepare_model_for_kbit_training(model, **preprare_model_kwargs)
 
                 model = get_peft_model(model, peft_config)
+
+        if is_peft_available() and isinstance(model, PeftModel):
+            if callbacks is None:
+                callbacks = [PeftSavingCallback()]
+            else:
+                callbacks += [PeftSavingCallback()]
 
         if compute_metrics is None:
             compute_metrics = compute_accuracy
@@ -196,22 +198,18 @@ class RewardTrainer(Trainer):
         else:
             self.use_reward_data_collator = False
         super().__init__(
-            model=model,
-            args=args,
-            data_collator=data_collator,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
-            model_init=model_init,
-            compute_metrics=compute_metrics,
-            callbacks=callbacks,
-            optimizers=optimizers,
-            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+            model,
+            args,
+            data_collator,
+            train_dataset,
+            eval_dataset,
+            tokenizer,
+            model_init,
+            compute_metrics,
+            callbacks,
+            optimizers,
+            preprocess_logits_for_metrics,
         )
-
-        # Add tags for models that have been loaded with the correct transformers version
-        if hasattr(self.model, "add_model_tags"):
-            self.model.add_model_tags(self._tag_names)
 
     def compute_loss(
         self,
@@ -228,13 +226,11 @@ class RewardTrainer(Trainer):
         rewards_chosen = model(
             input_ids=inputs["input_ids_chosen"],
             attention_mask=inputs["attention_mask_chosen"],
-            return_dict=True,
-        )["logits"]
+        )[0]
         rewards_rejected = model(
             input_ids=inputs["input_ids_rejected"],
             attention_mask=inputs["attention_mask_rejected"],
-            return_dict=True,
-        )["logits"]
+        )[0]
         # calculate loss, optionally modulate with margin
         if "margin" in inputs:
             loss = -nn.functional.logsigmoid(rewards_chosen - rewards_rejected - inputs["margin"]).mean()

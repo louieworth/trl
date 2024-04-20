@@ -4,27 +4,22 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
+import tyro
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import AutoPeftModelForCausalLM, LoraConfig
 from tqdm import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    HfArgumentParser,
-    TrainingArguments,
-    set_seed,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainingArguments
 
 from trl import SFTTrainer
-from trl.import_utils import is_npu_available, is_xpu_available
+from trl.import_utils import is_xpu_available
 from trl.trainer import ConstantLengthDataset
 
 
 @dataclass
 class ScriptArguments:
     model_name: Optional[str] = field(default="meta-llama/Llama-2-7b-hf", metadata={"help": "the model name"})
+
     dataset_name: Optional[str] = field(default="lvwerra/stack-exchange-paired", metadata={"help": "the dataset name"})
     subset: Optional[str] = field(default="data/finetune", metadata={"help": "the subset to use"})
     split: Optional[str] = field(default="train", metadata={"help": "the split to use"})
@@ -33,35 +28,53 @@ class ScriptArguments:
     shuffle_buffer: Optional[int] = field(default=5000, metadata={"help": "the shuffle buffer size"})
     seq_length: Optional[int] = field(default=1024, metadata={"help": "the sequence length"})
     num_workers: Optional[int] = field(default=4, metadata={"help": "the number of workers"})
+
+    training_args: TrainingArguments = field(
+        default_factory=lambda: TrainingArguments(
+            output_dir="./results",
+            max_steps=500,
+            logging_steps=10,
+            save_steps=10,
+            per_device_train_batch_size=4,
+            per_device_eval_batch_size=1,
+            gradient_accumulation_steps=2,
+            gradient_checkpointing=False,
+            group_by_length=False,
+            learning_rate=1e-4,
+            lr_scheduler_type="cosine",
+            warmup_steps=100,
+            weight_decay=0.05,
+            optim="paged_adamw_32bit",
+            bf16=True,
+            remove_unused_columns=False,
+            run_name="sft_llama2",
+            report_to="wandb",
+        )
+    )
+
     packing: Optional[bool] = field(default=True, metadata={"help": "whether to use packing for SFTTrainer"})
-    use_bnb: Optional[bool] = field(default=True, metadata={"help": "whether to use BitsAndBytes"})
 
-    # LoraConfig
-    lora_alpha: Optional[float] = field(default=16, metadata={"help": "the lora alpha parameter"})
-    lora_dropout: Optional[float] = field(default=0.05, metadata={"help": "the lora dropout parameter"})
-    lora_r: Optional[int] = field(default=8, metadata={"help": "the lora r parameter"})
+    peft_config: LoraConfig = field(
+        default_factory=lambda: LoraConfig(
+            r=8,
+            lora_alpha=16,
+            lora_dropout=0.05,
+            target_modules=["q_proj", "v_proj"],
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+    )
 
 
-parser = HfArgumentParser((ScriptArguments, TrainingArguments))
-script_args, training_args = parser.parse_args_into_dataclasses()
-peft_config = LoraConfig(
-    r=script_args.lora_r,
-    lora_alpha=script_args.lora_alpha,
-    lora_dropout=script_args.lora_dropout,
-    target_modules=["q_proj", "v_proj"],
-    bias="none",
-    task_type="CAUSAL_LM",
-)
+script_args = tyro.cli(ScriptArguments)
 
-if training_args.group_by_length and script_args.packing:
+if script_args.training_args.group_by_length and script_args.packing:
     raise ValueError("Cannot use both packing and group by length")
 
 # `gradient_checkpointing` was True by default until `1f3314`, but it's actually not used.
 # `gradient_checkpointing=True` will cause `Variable._execution_engine.run_backward`.
-if training_args.gradient_checkpointing:
+if script_args.training_args.gradient_checkpointing:
     raise ValueError("gradient_checkpointing not supported")
-
-set_seed(training_args.seed)
 
 
 def chars_token_ratio(dataset, tokenizer, nb_examples=400):
@@ -101,7 +114,7 @@ def prepare_sample_text(example):
     return text
 
 
-def create_datasets(tokenizer, args, seed=None):
+def create_datasets(tokenizer, args):
     dataset = load_dataset(
         args.dataset_name,
         data_dir=args.subset,
@@ -114,9 +127,9 @@ def create_datasets(tokenizer, args, seed=None):
         print("Loading the dataset in streaming mode")
         valid_data = dataset.take(args.size_valid_set)
         train_data = dataset.skip(args.size_valid_set)
-        train_data = train_data.shuffle(buffer_size=args.shuffle_buffer, seed=seed)
+        train_data = train_data.shuffle(buffer_size=args.shuffle_buffer, seed=None)
     else:
-        dataset = dataset.train_test_split(test_size=0.005, seed=seed)
+        dataset = dataset.train_test_split(test_size=0.005, seed=None)
         train_data = dataset["train"]
         valid_data = dataset["test"]
         print(f"Size of the train set: {len(train_data)}. Size of the validation set: {len(valid_data)}")
@@ -143,13 +156,11 @@ def create_datasets(tokenizer, args, seed=None):
     return train_dataset, valid_dataset
 
 
-bnb_config = None
-if script_args.use_bnb:
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+)
 
 base_model = AutoModelForCausalLM.from_pretrained(
     script_args.model_name,
@@ -160,12 +171,15 @@ base_model = AutoModelForCausalLM.from_pretrained(
 )
 base_model.config.use_cache = False
 
+peft_config = script_args.peft_config
 
 tokenizer = AutoTokenizer.from_pretrained(script_args.model_name, trust_remote_code=True)
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"  # Fix weird overflow issue with fp16 training
 
-train_dataset, eval_dataset = create_datasets(tokenizer, script_args, seed=training_args.seed)
+training_args = script_args.training_args
+
+train_dataset, eval_dataset = create_datasets(tokenizer, script_args)
 
 trainer = SFTTrainer(
     model=base_model,
@@ -178,22 +192,20 @@ trainer = SFTTrainer(
     args=training_args,
 )
 trainer.train()
-trainer.save_model(training_args.output_dir)
+trainer.save_model(script_args.training_args.output_dir)
 
-output_dir = os.path.join(training_args.output_dir, "final_checkpoint")
+output_dir = os.path.join(script_args.training_args.output_dir, "final_checkpoint")
 trainer.model.save_pretrained(output_dir)
 
 # Free memory for merging weights
 del base_model
 if is_xpu_available():
     torch.xpu.empty_cache()
-elif is_npu_available():
-    torch.npu.empty_cache()
 else:
     torch.cuda.empty_cache()
 
 model = AutoPeftModelForCausalLM.from_pretrained(output_dir, device_map="auto", torch_dtype=torch.bfloat16)
 model = model.merge_and_unload()
 
-output_merged_dir = os.path.join(training_args.output_dir, "final_merged_checkpoint")
+output_merged_dir = os.path.join(script_args.training_args.output_dir, "final_merged_checkpoint")
 model.save_pretrained(output_merged_dir, safe_serialization=True)

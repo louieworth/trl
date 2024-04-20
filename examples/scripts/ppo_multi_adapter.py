@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,11 +19,10 @@ import torch
 from datasets import load_dataset
 from peft import LoraConfig
 from tqdm import tqdm
-from transformers import AutoTokenizer, BitsAndBytesConfig, HfArgumentParser
+from transformers import BitsAndBytesConfig, HfArgumentParser, LlamaTokenizer
 
-from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
+from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer, is_xpu_available
 from trl.core import LengthSampler
-from trl.import_utils import is_npu_available, is_xpu_available
 
 
 input_min_text_length = 6
@@ -82,13 +82,13 @@ nf4_config = BitsAndBytesConfig(
 )
 model = AutoModelForCausalLMWithValueHead.from_pretrained(
     script_args.model_name,
-    device_map={"": "xpu:0"} if is_xpu_available() else {"": "npu:0"} if is_npu_available else {"": 0},
+    device_map={"": "xpu:0"} if is_xpu_available() else {"": 0},
     peft_config=lora_config,
     quantization_config=nf4_config,
     reward_adapter=script_args.rm_adapter,
     use_safetensors=script_args.use_safetensors,
 )
-tokenizer = AutoTokenizer.from_pretrained(script_args.model_name)
+tokenizer = LlamaTokenizer.from_pretrained(script_args.model_name)
 
 tokenizer.pad_token = tokenizer.eos_token
 
@@ -96,7 +96,7 @@ dataset = create_and_prepare_dataset(tokenizer)
 
 
 def collator(data):
-    return {key: [d[key] for d in data] for key in data[0]}
+    return dict((key, [d[key] for d in data]) for key in data[0])
 
 
 config = PPOConfig(
@@ -127,10 +127,9 @@ generation_kwargs = {
     "top_p": 0.9,
     "do_sample": True,
     "pad_token_id": tokenizer.pad_token_id,
-    "max_new_tokens": 32,
 }
 
-for _epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
+for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     question_tensors = batch["input_ids"]
 
     response_tensors = ppo_trainer.generate(
@@ -143,7 +142,7 @@ for _epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     # Compute reward score
     texts = [q + r for q, r in zip(batch["query"], batch["response"])]
     inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(ppo_trainer.accelerator.device)
-    raw_rewards = ppo_trainer.accelerator.unwrap_model(ppo_trainer.model).compute_reward_score(**inputs)
+    raw_rewards = ppo_trainer.model.compute_reward_score(**inputs)
     rewards = [raw_rewards[i, -1, 1] for i in range(len(raw_rewards))]  # take last token
 
     # Run PPO step

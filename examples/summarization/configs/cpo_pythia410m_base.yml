@@ -1,0 +1,23 @@
+model_name: mnoukhov/pythia410m-tldr-sft
+dataset_name: mnoukhov/openai_summarize_comparisons_tldrprompt_relabel1b
+gold_model_name: mnoukhov/pythia1b-sft-rm-tldrprompt
+epochs: 8
+log_interval: 1000
+eval_steps: 2000
+load_in_8bit: False
+bf16: False
+fp16: False
+learning_rate: 1e-5
+use_peft: True
+lora_all_linear: True
+lora_r: 8
+lora_alpha: 32
+lora_dropout: 0.05
+mini_batch_size: 1
+batch_size: 8
+gradient_accumulation_steps: 4
+# warmup_steps: 150
+
+input_ids_input: False
+strip_prompt: True
+

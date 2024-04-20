@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import random
 import warnings
 from collections import deque
@@ -19,23 +20,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from accelerate import PartialState
-from rich.console import Console, Group
-from rich.live import Live
-from rich.panel import Panel
-from rich.progress import Progress
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import IterableDataset
-from transformers import BitsAndBytesConfig, DataCollatorForLanguageModeling, PreTrainedTokenizerBase
-from transformers.trainer import TrainerCallback
-from transformers.trainer_utils import has_length
-
-from ..import_utils import is_peft_available, is_unsloth_available, is_xpu_available
-from ..trainer.model_config import ModelConfig
-
-
-if is_peft_available():
-    from peft import LoraConfig, PeftConfig
+from transformers import DataCollatorForLanguageModeling, PreTrainedModel, PreTrainedTokenizerBase, TrainerCallback
 
 
 class AdaptiveKLController:
@@ -73,11 +60,11 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     calculated on the completion made by the assistant.
 
     Args:
+        instruction_template (`Optional[str]`): the template form that indicates the start of the human instruction, typically something like
+            '### Human:\n'. Useful for assistant-style conversation datasets
         response_template (`Union[str, List[int]]`): the template form that indicates the start of the response, typically something like
             '### Response:\n'. It can also be passed as tokenized ids, which can be useful when using a tokenizer that encodes the response
             differently if it does not have proper context.
-        instruction_template (`Union[str, List[int]]`): the template form that indicates the start of the human instruction, typically something like
-            '### Human:\n'. Useful for assistant-style conversation datasets. It can also be passed as tokenized ids.
         mlm (`bool`, *optional*, defaults to `False`): Whether or not to use masked language modeling in the underlying
             `DataCollatorForLanguageModeling` class. Note that this option currently has no effect but is present
              for flexibility and backwards-compatibility.
@@ -88,7 +75,7 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     def __init__(
         self,
         response_template: Union[str, List[int]],
-        instruction_template: Optional[Union[str, List[int]]] = None,
+        instruction_template: Union[str, List[int]] = None,
         *args,
         mlm: bool = False,
         ignore_index: int = -100,
@@ -111,14 +98,6 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
         else:
             # The user already provides the token ids
             self.response_token_ids = response_template
-
-        if not self.mlm and self.instruction_template and self.tokenizer.pad_token_id == self.tokenizer.eos_token_id:
-            warnings.warn(
-                "The pad_token_id and eos_token_id values of this tokenizer are identical. "
-                "If you are planning for multi-turn training, "
-                "it can result in the model continuously generating questions and answers without eos token. "
-                "To avoid this, set the pad_token_id to a different value."
-            )
 
         self.ignore_index = ignore_index
 
@@ -188,13 +167,6 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
                     )
                     batch["labels"][i, :] = self.ignore_index
 
-                if (
-                    len(human_token_ids_idxs) > 0
-                    and len(response_token_ids_idxs) > 0
-                    and human_token_ids_idxs[0] > response_token_ids_idxs[0]
-                ):
-                    human_token_ids_idxs = [0] + human_token_ids_idxs
-
                 for idx, (start, end) in enumerate(zip(human_token_ids_idxs, response_token_ids_idxs)):
                     # Make pytorch loss function ignore all non response tokens
                     if idx != 0:
@@ -206,6 +178,325 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
                     batch["labels"][i, human_token_ids_idxs[-1] :] = self.ignore_index
 
         return batch
+
+@dataclass
+class RewardDataCollatorWithPadding:
+    r"""
+    Reward DataCollator class that pads the inputs to the maximum length of the batch.
+    Args:
+        tokenizer (`PreTrainedTokenizerBase`):
+            The tokenizer used for encoding the data.
+        padding (`Union[bool, str, `PaddingStrategy`]`, `optional`, defaults to `True`):
+            padding_strategy to pass to the tokenizer.
+        max_length (`Optional[int]`, `optional`, defaults to `None`):
+            The maximum length of the sequence to be processed.
+        pad_to_multiple_of (`Optional[int]`, `optional`, defaults to `None`):
+            If set will pad the sequence to a multiple of the provided value.
+        return_tensors (`str`, `optional`, defaults to `"pt"`):
+            The tensor type to use.
+    """
+    tokenizer: PreTrainedTokenizerBase
+    padding: Union[bool, str] = True
+    max_length: Optional[int] = None
+    pad_to_multiple_of: Optional[int] = None
+    return_tensors: str = "pt"
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        features_chosen = []
+        features_rejected = []
+        margin = []
+        # check if we have a margin. If we do, we need to batch it as well
+        has_margin = "margin" in features[0]
+        for feature in features:
+            # check if the keys are named as expected
+            if (
+                "input_ids_chosen" not in feature
+                or "input_ids_rejected" not in feature
+                or "attention_mask_chosen" not in feature
+                or "attention_mask_rejected" not in feature
+            ):
+                raise ValueError(
+                    "The features should include `input_ids_chosen`, `attention_mask_chosen`, `input_ids_rejected` and `attention_mask_rejected`"
+                )
+
+            features_chosen.append(
+                {
+                    "input_ids": feature["input_ids_chosen"],
+                    "attention_mask": feature["attention_mask_chosen"],
+                }
+            )
+            features_rejected.append(
+                {
+                    "input_ids": feature["input_ids_rejected"],
+                    "attention_mask": feature["attention_mask_rejected"],
+                }
+            )
+            if has_margin:
+                margin.append(feature["margin"])
+        batch_chosen = self.tokenizer.pad(
+            features_chosen,
+            padding=self.padding,
+            max_length=self.max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors=self.return_tensors,
+        )
+        batch_rejected = self.tokenizer.pad(
+            features_rejected,
+            padding=self.padding,
+            max_length=self.max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors=self.return_tensors,
+        )
+        batch = {
+            "input_ids_chosen": batch_chosen["input_ids"],
+            "attention_mask_chosen": batch_chosen["attention_mask"],
+            "input_ids_rejected": batch_rejected["input_ids"],
+            "attention_mask_rejected": batch_rejected["attention_mask"],
+            "return_loss": True,
+        }
+        if has_margin:
+            margin = torch.tensor(margin, dtype=torch.float)
+            batch["margin"] = margin
+        return batch
+
+
+@dataclass
+class CPODataCollatorWithPadding:
+    r"""
+    CPO DataCollator class that pads the inputs to the maximum length of the batch.
+    Args:
+        tokenizer (`PreTrainedTokenizerBase`):
+            The tokenizer used for encoding the data.
+        model (Optional[`PreTrainedModel`]):
+            The model that is being trained. If set and has the *prepare_decoder_input_ids_from_labels*, use it to
+            prepare the *decoder_input_ids*.
+        padding (`Union[bool, str, `PaddingStrategy`]`, `optional`, defaults to `True`):
+            padding_strategy to pass to the tokenizer.
+        max_length (`Optional[int]`, `optional`, defaults to `None`):
+            The maximum length of the sequence to be processed.
+        max_prompt_length (`Optional[int]`, `optional`, defaults to `None`):
+            The maximum length of the prompt to be processed.
+        label_pad_token_id (`int`, defaults to -100):
+            The label used for masking.
+        padding_value (`int`, defaults to 0):
+            The value used for padding.
+        is_encoder_decoder (`Optional[bool]`, `optional`, defaults to `None`):
+            Whether or not you model has an encoder_decoder architecture.
+        max_target_length (`Optional[int]`, `optional`, defaults to `None`):
+            The maximum length of the target to be processed. Only useful for encoder-decoder architectures.
+        truncation_mode: (`str`, defaults to "keep_end"):
+            The truncation mode to use when truncating the prompt.
+    """
+    def __init__(self,
+        tokenizer: PreTrainedTokenizerBase,
+        model: Optional[PreTrainedModel] = None,
+        padding: Union[bool, str] = True,
+        max_length: Optional[int] = 560,
+        max_prompt_length: Optional[int] = None,
+        label_pad_token_id: int = -100,
+        padding_value: int = 0,
+        truncation_mode: str = "keep_end",
+        is_encoder_decoder: Optional[bool] = False,
+        max_target_length: Optional[int] = None,
+    ):
+        self.tokenizer = tokenizer
+        self.model = model
+        self.padding = padding
+        self.max_length = max_length
+        self.max_prompt_length = max_prompt_length
+        self.label_pad_token_id = label_pad_token_id
+        self.padding_value = padding_value
+        self.truncation_mode = truncation_mode
+        self.is_encoder_decoder = is_encoder_decoder
+        self.max_target_length = max_target_length
+
+    def tokenize_batch_element(
+        self,
+        prompt: str,
+        chosen: str,
+        rejected: str,
+    ) -> Dict:
+        """Tokenize a single batch element.
+
+        At this stage, we don't convert to PyTorch tensors yet; we just handle the truncation
+            in case the prompt + chosen or prompt + rejected responses is/are too long. First
+            we truncate the prompt; if we're still too long, we truncate the chosen/rejected.
+
+        We also create the labels for the chosen/rejected responses, which are of length equal to
+            the sum of the length of the prompt and the chosen/rejected response, with
+            label_pad_token_id  for the prompt tokens.
+        """
+        batch = {}
+        if not self.is_encoder_decoder:
+            chosen_tokens = self.tokenizer(chosen, add_special_tokens=False)
+            rejected_tokens = self.tokenizer(rejected, add_special_tokens=False)
+            prompt_tokens = self.tokenizer(prompt, add_special_tokens=False)
+
+            eos_token_id = self.tokenizer.eos_token_id
+            # Get indices in list prompt_tokens["input_ids"] that equals the EOS token (often 0)
+            eos_indices_prompt = [i for i, x in enumerate(prompt_tokens["input_ids"]) if x == eos_token_id]
+            # attention mask these indices to eos_token_id
+            new_attention_mask = [
+                0 if i in eos_indices_prompt else p for i, p in enumerate(prompt_tokens["attention_mask"])
+            ]
+            prompt_tokens["attention_mask"] = new_attention_mask
+
+            # do the same for chosen and rejected
+            eos_indices_chosen = [i for i, x in enumerate(chosen_tokens["input_ids"]) if x == eos_token_id]
+            new_attention_mask_c = [
+                0 if i in eos_indices_chosen else p for i, p in enumerate(chosen_tokens["attention_mask"])
+            ]
+            chosen_tokens["attention_mask"] = new_attention_mask_c
+
+            eos_indices_rejected = [i for i, x in enumerate(rejected_tokens["input_ids"]) if x == eos_token_id]
+            new_attention_mask_r = [
+                0 if i in eos_indices_rejected else p for i, p in enumerate(rejected_tokens["attention_mask"])
+            ]
+            rejected_tokens["attention_mask"] = new_attention_mask_r
+
+            # add EOS token to end of prompt
+            chosen_tokens["input_ids"].append(self.tokenizer.eos_token_id)
+            chosen_tokens["attention_mask"].append(1)
+
+            rejected_tokens["input_ids"].append(self.tokenizer.eos_token_id)
+            rejected_tokens["attention_mask"].append(1)
+
+            longer_response_length = max(len(chosen_tokens["input_ids"]), len(rejected_tokens["input_ids"]))
+
+            # if combined sequence is too long, truncate the prompt
+            if len(prompt_tokens["input_ids"]) + longer_response_length > self.max_length:
+                if self.truncation_mode == "keep_start":
+                    prompt_tokens = {k: v[: self.max_prompt_length] for k, v in prompt_tokens.items()}
+                elif self.truncation_mode == "keep_end":
+                    prompt_tokens = {k: v[-self.max_prompt_length :] for k, v in prompt_tokens.items()}
+                else:
+                    raise ValueError(f"Unknown truncation mode: {self.truncation_mode}")
+
+            # if that's still too long, truncate the response
+            if len(prompt_tokens["input_ids"]) + longer_response_length > self.max_length:
+                chosen_tokens = {k: v[: self.max_length - self.max_prompt_length] for k, v in chosen_tokens.items()}
+                rejected_tokens = {
+                    k: v[: self.max_length - self.max_prompt_length] for k, v in rejected_tokens.items()
+                }
+
+            # Create labels
+            chosen_sequence_tokens = {k: prompt_tokens[k] + chosen_tokens[k] for k in chosen_tokens}
+            rejected_sequence_tokens = {k: prompt_tokens[k] + rejected_tokens[k] for k in rejected_tokens}
+            chosen_sequence_tokens["labels"] = chosen_sequence_tokens["input_ids"][:]
+            chosen_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] = [self.label_pad_token_id] * len(
+                prompt_tokens["input_ids"]
+            )
+            rejected_sequence_tokens["labels"] = rejected_sequence_tokens["input_ids"][:]
+            rejected_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] = [self.label_pad_token_id] * len(
+                prompt_tokens["input_ids"]
+            )
+
+            for k, toks in {
+                "chosen": chosen_sequence_tokens,
+                "rejected": rejected_sequence_tokens,
+                "prompt": prompt_tokens,
+            }.items():
+                for type_key, tokens in toks.items():
+                    if type_key == "token_type_ids":
+                        continue
+                    batch[f"{k}_{type_key}"] = tokens
+
+        else:
+            chosen_tokens = self.tokenizer(
+                chosen, truncation=True, max_length=self.max_target_length, add_special_tokens=True
+            )
+            rejected_tokens = self.tokenizer(
+                rejected, truncation=True, max_length=self.max_target_length, add_special_tokens=True
+            )
+            prompt_tokens = self.tokenizer(
+                prompt, truncation=True, max_length=self.max_prompt_length, add_special_tokens=True
+            )
+
+            batch["chosen_labels"] = chosen_tokens["input_ids"]
+            batch["rejected_labels"] = rejected_tokens["input_ids"]
+            batch["prompt_input_ids"] = prompt_tokens["input_ids"]
+            batch["prompt_attention_mask"] = prompt_tokens["attention_mask"]
+
+            if self.model is not None and hasattr(self.model, "prepare_decoder_input_ids_from_labels"):
+                batch["rejected_decoder_input_ids"] = self.model.prepare_decoder_input_ids_from_labels(
+                    labels=batch["rejected_labels"]
+                )
+                batch["chosen_decoder_input_ids"] = self.model.prepare_decoder_input_ids_from_labels(
+                    labels=batch["chosen_labels"]
+                )
+
+        batch["prompt"] = prompt
+        batch["chosen"] = prompt + chosen
+        batch["rejected"] = prompt + rejected
+        batch["chosen_response_only"] = chosen
+        batch["rejected_response_only"] = rejected
+
+        return batch
+
+    def collate(self, batch):
+        # first, pad everything to the same length
+        padded_batch = {}
+        for k in batch[0].keys():
+            if k.endswith("_input_ids") or k.endswith("_attention_mask") or k.endswith("_labels"):
+                if self.is_encoder_decoder:
+                    to_pad = [torch.LongTensor(ex[k]) for ex in batch]
+
+                    if (k.startswith("prompt")) and (k.endswith("input_ids")):
+                        padding_value = self.tokenizer.pad_token_id
+                    elif k.endswith("_attention_mask"):
+                        padding_value = 0
+                    elif (k.startswith("chosen")) or (k.startswith("rejected")) or ("decoder" in k):
+                        padding_value = self.label_pad_token_id
+                    else:
+                        raise ValueError(f"Unexpected key in batch '{k}'")
+                    padded_batch[k] = pad_sequence(to_pad, batch_first=True, padding_value=padding_value)
+                else:
+                    # adapted from https://stackoverflow.com/questions/73256206
+                    if "prompt" in k:
+                        to_pad = [torch.LongTensor(ex[k][::-1]) for ex in batch]
+                    else:
+                        to_pad = [torch.LongTensor(ex[k]) for ex in batch]
+                    if k.endswith("_input_ids"):
+                        padding_value = self.tokenizer.pad_token_id
+                    elif k.endswith("_labels"):
+                        padding_value = self.label_pad_token_id
+                    elif k.endswith("_attention_mask"):
+                        padding_value = self.padding_value
+                    else:
+                        raise ValueError(f"Unexpected key in batch '{k}'")
+
+                    padded_batch[k] = pad_sequence(to_pad, batch_first=True, padding_value=padding_value)
+                    # for the prompt, flip back so padding is on left side
+                    if "prompt" in k:
+                        padded_batch[k] = padded_batch[k].flip(dims=[1])
+            else:
+                padded_batch[k] = [ex[k] for ex in batch]
+
+        return padded_batch
+
+    def shuffle_dataset(self, dataset: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        if not isinstance(dataset, Dict):
+            dataset = dataset.to_dict()
+        indices = list(range(len(dataset["prompt"])))
+        random.shuffle(indices)
+        return {key: [values[i] for i in indices] for key, values in dataset.items()}
+
+
+    def generate_batches(self, dataset: Dict[str, List[Any]], batch_size: int) -> Dict[str, Any]:
+        dataset = self.shuffle_dataset(dataset)
+        total_samples = len(dataset["prompt"])
+        for i in range(0, total_samples, batch_size):
+            batch = {key: values[i:i + batch_size] for key, values in dataset.items()}
+            processed_batch = []
+            for j in range(len(batch["prompt"])):
+                feature = {key: values[j] for key, values in batch.items()}
+                prompt = feature["prompt"]
+                chosen = feature["chosen"]
+                rejected = feature["rejected"]
+                batch_element = self.tokenize_batch_element(prompt, chosen, rejected)
+                processed_batch.append(batch_element)
+            yield self.collate(processed_batch)
+
 
 
 @dataclass
@@ -224,7 +515,6 @@ class RewardDataCollatorWithPadding:
         return_tensors (`str`, `optional`, defaults to `"pt"`):
             The tensor type to use.
     """
-
     tokenizer: PreTrainedTokenizerBase
     padding: Union[bool, str] = True
     max_length: Optional[int] = None
@@ -293,39 +583,177 @@ class RewardDataCollatorWithPadding:
 @dataclass
 class DPODataCollatorWithPadding:
     r"""
-    DPO DataCollator class that pads the tokenized inputs to the maximum length of the batch.
+    DPO DataCollator class that pads the inputs to the maximum length of the batch.
     Args:
-        pad_token_id (`int` defaults to 0):
-            The tokenizer's pad_token_id.
+        tokenizer (`PreTrainedTokenizerBase`):
+            The tokenizer used for encoding the data.
+        model (Optional[`PreTrainedModel`]):
+            The model that is being trained. If set and has the *prepare_decoder_input_ids_from_labels*, use it to
+            prepare the *decoder_input_ids*.
+        padding (`Union[bool, str, `PaddingStrategy`]`, `optional`, defaults to `True`):
+            padding_strategy to pass to the tokenizer.
+        max_length (`Optional[int]`, `optional`, defaults to `None`):
+            The maximum length of the sequence to be processed.
+        max_prompt_length (`Optional[int]`, `optional`, defaults to `None`):
+            The maximum length of the prompt to be processed.
         label_pad_token_id (`int`, defaults to -100):
             The label used for masking.
+        padding_value (`int`, defaults to 0):
+            The value used for padding.
         is_encoder_decoder (`Optional[bool]`, `optional`, defaults to `None`):
             Whether or not you model has an encoder_decoder architecture.
+        max_target_length (`Optional[int]`, `optional`, defaults to `None`):
+            The maximum length of the target to be processed. Only useful for encoder-decoder architectures.
+        truncation_mode: (`str`, defaults to "keep_end"):
+            The truncation mode to use when truncating the prompt.
     """
-
-    pad_token_id: int = 0
+    tokenizer: PreTrainedTokenizerBase
+    model: Optional[PreTrainedModel] = None
+    padding: Union[bool, str] = True
+    max_length: Optional[int] = None
+    max_prompt_length: Optional[int] = None
     label_pad_token_id: int = -100
+    padding_value: int = 0
+    truncation_mode: str = "keep_end"
     is_encoder_decoder: Optional[bool] = False
+    max_target_length: Optional[int] = None
 
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def tokenize_batch_element(
+        self,
+        prompt: str,
+        chosen: str,
+        rejected: str,
+    ) -> Dict:
+        """Tokenize a single batch element.
+
+        At this stage, we don't convert to PyTorch tensors yet; we just handle the truncation
+            in case the prompt + chosen or prompt + rejected responses is/are too long. First
+            we truncate the prompt; if we're still too long, we truncate the chosen/rejected.
+
+        We also create the labels for the chosen/rejected responses, which are of length equal to
+            the sum of the length of the prompt and the chosen/rejected response, with
+            label_pad_token_id  for the prompt tokens.
+        """
+        batch = {}
+        if not self.is_encoder_decoder:
+            chosen_tokens = self.tokenizer(chosen, add_special_tokens=False)
+            rejected_tokens = self.tokenizer(rejected, add_special_tokens=False)
+            prompt_tokens = self.tokenizer(prompt, add_special_tokens=False)
+
+            eos_token_id = self.tokenizer.eos_token_id
+            # Get indices in list prompt_tokens["input_ids"] that equals the EOS token (often 0)
+            eos_indices_prompt = [i for i, x in enumerate(prompt_tokens["input_ids"]) if x == eos_token_id]
+            # attention mask these indices to eos_token_id
+            new_attention_mask = [
+                0 if i in eos_indices_prompt else p for i, p in enumerate(prompt_tokens["attention_mask"])
+            ]
+            prompt_tokens["attention_mask"] = new_attention_mask
+
+            # do the same for chosen and rejected
+            eos_indices_chosen = [i for i, x in enumerate(chosen_tokens["input_ids"]) if x == eos_token_id]
+            new_attention_mask_c = [
+                0 if i in eos_indices_chosen else p for i, p in enumerate(chosen_tokens["attention_mask"])
+            ]
+            chosen_tokens["attention_mask"] = new_attention_mask_c
+
+            eos_indices_rejected = [i for i, x in enumerate(rejected_tokens["input_ids"]) if x == eos_token_id]
+            new_attention_mask_r = [
+                0 if i in eos_indices_rejected else p for i, p in enumerate(rejected_tokens["attention_mask"])
+            ]
+            rejected_tokens["attention_mask"] = new_attention_mask_r
+
+            # add EOS token to end of prompt
+            chosen_tokens["input_ids"].append(self.tokenizer.eos_token_id)
+            chosen_tokens["attention_mask"].append(1)
+
+            rejected_tokens["input_ids"].append(self.tokenizer.eos_token_id)
+            rejected_tokens["attention_mask"].append(1)
+
+            longer_response_length = max(len(chosen_tokens["input_ids"]), len(rejected_tokens["input_ids"]))
+
+            # if combined sequence is too long, truncate the prompt
+            if len(prompt_tokens["input_ids"]) + longer_response_length > self.max_length:
+                if self.truncation_mode == "keep_start":
+                    prompt_tokens = {k: v[: self.max_prompt_length] for k, v in prompt_tokens.items()}
+                elif self.truncation_mode == "keep_end":
+                    prompt_tokens = {k: v[-self.max_prompt_length :] for k, v in prompt_tokens.items()}
+                else:
+                    raise ValueError(f"Unknown truncation mode: {self.truncation_mode}")
+
+            # if that's still too long, truncate the response
+            if len(prompt_tokens["input_ids"]) + longer_response_length > self.max_length:
+                chosen_tokens = {k: v[: self.max_length - self.max_prompt_length] for k, v in chosen_tokens.items()}
+                rejected_tokens = {
+                    k: v[: self.max_length - self.max_prompt_length] for k, v in rejected_tokens.items()
+                }
+
+            # Create labels
+            chosen_sequence_tokens = {k: prompt_tokens[k] + chosen_tokens[k] for k in chosen_tokens}
+            rejected_sequence_tokens = {k: prompt_tokens[k] + rejected_tokens[k] for k in rejected_tokens}
+            chosen_sequence_tokens["labels"] = chosen_sequence_tokens["input_ids"][:]
+            chosen_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] = [self.label_pad_token_id] * len(
+                prompt_tokens["input_ids"]
+            )
+            rejected_sequence_tokens["labels"] = rejected_sequence_tokens["input_ids"][:]
+            rejected_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] = [self.label_pad_token_id] * len(
+                prompt_tokens["input_ids"]
+            )
+
+            for k, toks in {
+                "chosen": chosen_sequence_tokens,
+                "rejected": rejected_sequence_tokens,
+                "prompt": prompt_tokens,
+            }.items():
+                for type_key, tokens in toks.items():
+                    if type_key == "token_type_ids":
+                        continue
+                    batch[f"{k}_{type_key}"] = tokens
+
+        else:
+            chosen_tokens = self.tokenizer(
+                chosen, truncation=True, max_length=self.max_target_length, add_special_tokens=True
+            )
+            rejected_tokens = self.tokenizer(
+                rejected, truncation=True, max_length=self.max_target_length, add_special_tokens=True
+            )
+            prompt_tokens = self.tokenizer(
+                prompt, truncation=True, max_length=self.max_prompt_length, add_special_tokens=True
+            )
+
+            batch["chosen_labels"] = chosen_tokens["input_ids"]
+            batch["rejected_labels"] = rejected_tokens["input_ids"]
+            batch["prompt_input_ids"] = prompt_tokens["input_ids"]
+            batch["prompt_attention_mask"] = prompt_tokens["attention_mask"]
+
+            if self.model is not None and hasattr(self.model, "prepare_decoder_input_ids_from_labels"):
+                batch["rejected_decoder_input_ids"] = self.model.prepare_decoder_input_ids_from_labels(
+                    labels=batch["rejected_labels"]
+                )
+                batch["chosen_decoder_input_ids"] = self.model.prepare_decoder_input_ids_from_labels(
+                    labels=batch["chosen_labels"]
+                )
+
+        batch["prompt"] = prompt
+        batch["chosen"] = prompt + chosen
+        batch["rejected"] = prompt + rejected
+        batch["chosen_response_only"] = chosen
+        batch["rejected_response_only"] = rejected
+
+        return batch
+
+    def collate(self, batch):
         # first, pad everything to the same length
         padded_batch = {}
-        for k in features[0].keys():
+        for k in batch[0].keys():
             if k.endswith("_input_ids") or k.endswith("_attention_mask") or k.endswith("_labels"):
                 if self.is_encoder_decoder:
-                    to_pad = [torch.LongTensor(ex[k]) for ex in features]
+                    to_pad = [torch.LongTensor(ex[k]) for ex in batch]
 
                     if (k.startswith("prompt")) and (k.endswith("input_ids")):
-                        if self.pad_token_id is None:
-                            raise ValueError(
-                                "Padding is enabled, but the tokenizer is not configured with a padding token."
-                                " Explicitly set `tokenizer.pad_token` (e.g. `tokenizer.pad_token = tokenizer.eos_token`)"
-                                " before calling the trainer."
-                            )
-                        padding_value = self.pad_token_id
+                        padding_value = self.tokenizer.pad_token_id
                     elif k.endswith("_attention_mask"):
                         padding_value = 0
-                    elif k.startswith(("chosen", "rejected", "completion")) or ("decoder" in k):
+                    elif (k.startswith("chosen")) or (k.startswith("rejected")) or ("decoder" in k):
                         padding_value = self.label_pad_token_id
                     else:
                         raise ValueError(f"Unexpected key in batch '{k}'")
@@ -333,21 +761,15 @@ class DPODataCollatorWithPadding:
                 else:
                     # adapted from https://stackoverflow.com/questions/73256206
                     if "prompt" in k:
-                        to_pad = [torch.LongTensor(ex[k][::-1]) for ex in features]
+                        to_pad = [torch.LongTensor(ex[k][::-1]) for ex in batch]
                     else:
-                        to_pad = [torch.LongTensor(ex[k]) for ex in features]
+                        to_pad = [torch.LongTensor(ex[k]) for ex in batch]
                     if k.endswith("_input_ids"):
-                        if self.pad_token_id is None:
-                            raise ValueError(
-                                "Padding is enabled, but the tokenizer is not configured with a padding token."
-                                " Explicitly set `tokenizer.pad_token` (e.g. `tokenizer.pad_token = tokenizer.eos_token`)"
-                                " before calling the trainer."
-                            )
-                        padding_value = self.pad_token_id
+                        padding_value = self.tokenizer.pad_token_id
                     elif k.endswith("_labels"):
                         padding_value = self.label_pad_token_id
                     elif k.endswith("_attention_mask"):
-                        padding_value = 0
+                        padding_value = self.padding_value
                     else:
                         raise ValueError(f"Unexpected key in batch '{k}'")
 
@@ -355,13 +777,24 @@ class DPODataCollatorWithPadding:
                     # for the prompt, flip back so padding is on left side
                     if "prompt" in k:
                         padded_batch[k] = padded_batch[k].flip(dims=[1])
-            elif k.endswith("_logps"):
-                # the cached reference model logprobs
-                padded_batch[k] = torch.tensor([ex[k] for ex in features])
             else:
-                padded_batch[k] = [ex[k] for ex in features]
+                padded_batch[k] = [ex[k] for ex in batch]
 
         return padded_batch
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        tokenized_batch = []
+
+        for feature in features:
+            prompt = feature["prompt"]
+            chosen = feature["chosen"]
+            rejected = feature["rejected"]
+
+            batch_element = self.tokenize_batch_element(prompt, chosen, rejected)
+            tokenized_batch.append(batch_element)
+
+        # return collated batch
+        return self.collate(tokenized_batch)
 
 
 class ConstantLengthDataset(IterableDataset):
@@ -379,7 +812,7 @@ class ConstantLengthDataset(IterableDataset):
                 Name of the field in the dataset that contains the text. Used only if `formatting_func` is `None`.
             formatting_func (`Callable`, **optional**):
                 Function that formats the text before tokenization. Usually it is recommended to have follows a certain
-                pattern such as `"### Question: {question} ### Answer: {answer}"`
+                pattern such as `"### Question: {question}\n ### Answer: {answer}\n"`
             infinite (`bool`, *optional*, defaults to `False`):
                 If True the iterator is reset after dataset reaches end else stops.
             seq_length (`int`, *optional*, defaults to `1024`):
@@ -392,10 +825,6 @@ class ConstantLengthDataset(IterableDataset):
                 Id of the end of sequence token if the passed tokenizer does not have an EOS token.
             shuffle ('bool', *optional*, defaults to True)
                 Shuffle the examples before they are returned
-            append_concat_token ('bool', *optional*, defaults to True)
-                If true, appends `eos_token_id` at the end of each sample being packed.
-            add_special_tokens ('bool', *optional*, defaults to True)
-                If true, tokenizers adds special tokens to each sample being packed.
     """
 
     def __init__(
@@ -410,8 +839,6 @@ class ConstantLengthDataset(IterableDataset):
         chars_per_token=3.6,
         eos_token_id=0,
         shuffle=True,
-        append_concat_token=True,
-        add_special_tokens=True,
     ):
         self.tokenizer = tokenizer
 
@@ -428,15 +855,14 @@ class ConstantLengthDataset(IterableDataset):
         self.current_size = 0
         self.max_buffer_size = seq_length * chars_per_token * num_of_sequences
         self.shuffle = shuffle
-        self.append_concat_token = append_concat_token
-        self.add_special_tokens = add_special_tokens
         if formatting_func is None:
             self.formatting_func = lambda x: x[dataset_text_field]
         else:
             self.formatting_func = formatting_func
 
         if formatting_func is not None:
-            if formatting_func.__code__.co_argcount > 1:
+            formatting_func_signature = formatting_func.__code__.co_varnames
+            if len(formatting_func_signature) > 1:
                 warnings.warn(
                     "The passed formatting_func has more than one argument. Usually that function should have a single argument `example`"
                     " which corresponds to the dictionary returned by each element of the dataset. Make sure you know what you are doing."
@@ -463,14 +889,10 @@ class ConstantLengthDataset(IterableDataset):
                     else:
                         more_examples = False
                         break
-            tokenized_inputs = self.tokenizer(buffer, add_special_tokens=self.add_special_tokens, truncation=False)[
-                "input_ids"
-            ]
+            tokenized_inputs = self.tokenizer(buffer, truncation=False)["input_ids"]
             all_token_ids = []
             for tokenized_input in tokenized_inputs:
-                if self.append_concat_token:
-                    tokenized_input = tokenized_input + [self.concat_token_id]
-                all_token_ids.extend(tokenized_input)
+                all_token_ids.extend(tokenized_input + [self.concat_token_id])
             examples = []
             for i in range(0, len(all_token_ids), self.seq_length):
                 input_ids = all_token_ids[i : i + self.seq_length]
@@ -484,6 +906,16 @@ class ConstantLengthDataset(IterableDataset):
                     "input_ids": torch.LongTensor(example),
                     "labels": torch.LongTensor(example),
                 }
+
+
+class PeftSavingCallback(TrainerCallback):
+    def on_save(self, args, state, control, **kwargs):
+        if args.should_save:
+            checkpoint_path = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+            kwargs["model"].save_pretrained(checkpoint_path)
+
+            if "pytorch_model.bin" in os.listdir(checkpoint_path):
+                os.remove(os.path.join(checkpoint_path, "pytorch_model.bin"))
 
 
 class RunningMoments:
@@ -549,10 +981,6 @@ def compute_accuracy(eval_pred) -> Dict[str, float]:
     predictions, labels = eval_pred
     # Here, predictions is rewards_chosen and rewards_rejected.
     # We want to see how much of the time rewards_chosen > rewards_rejected.
-    if np.array(predictions[:, 0] == predictions[:, 1], dtype=float).sum() > 0:
-        warnings.warn(
-            f"There are {np.array(predictions[:, 0] == predictions[:, 1]).sum()} out of {len(predictions[:, 0])} instances where the predictions for both options are equal. As a consequence the accuracy can be misleading."
-        )
     predictions = np.argmax(predictions, axis=1)
 
     accuracy = np.array(predictions == labels, dtype=float).mean().item()
@@ -656,162 +1084,3 @@ def neftune_post_forward_hook(module, input, output):
         mag_norm = module.neftune_noise_alpha / torch.sqrt(dims)
         output = output + torch.zeros_like(output).uniform_(-mag_norm, mag_norm)
     return output
-
-
-def peft_module_casting_to_bf16(model):
-    from peft.tuners.tuners_utils import BaseTunerLayer
-
-    for name, module in model.named_modules():
-        if isinstance(module, BaseTunerLayer):
-            module = module.to(torch.bfloat16)
-        elif isinstance(module, torch.nn.LayerNorm) or "norm" in name:
-            module = module.to(torch.float32)
-        elif any(x in name for x in ["lm_head", "embed_tokens", "wte", "wpe"]):
-            if hasattr(module, "weight"):
-                if module.weight.dtype == torch.float32:
-                    module = module.to(torch.bfloat16)
-
-
-def trl_sanitze_kwargs_for_tagging(model, tag_names, kwargs=None):
-    if is_unsloth_available():
-        # Unsloth adds a new attribute in the model config `unsloth_version`
-        # to keep track of models that have been patched with unsloth.
-        if hasattr(model, "config") and getattr(model.config, "unsloth_version", None) is not None:
-            tag_names.append("unsloth")
-
-    if kwargs is not None:
-        if "tags" not in kwargs:
-            kwargs["tags"] = tag_names
-        elif "tags" in kwargs and isinstance(kwargs["tags"], list):
-            kwargs["tags"].extend(tag_names)
-        elif "tags" in kwargs and isinstance(kwargs["tags"], str):
-            tag_names.append(kwargs["tags"])
-            kwargs["tags"] = tag_names
-    return kwargs
-
-
-def get_quantization_config(model_config: ModelConfig) -> Optional[BitsAndBytesConfig]:
-    if model_config.load_in_4bit:
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=model_config.torch_dtype,  # For consistency with model weights, we use the same value as `torch_dtype`
-            bnb_4bit_quant_type=model_config.bnb_4bit_quant_type,
-            bnb_4bit_use_double_quant=model_config.use_bnb_nested_quant,
-        )
-    elif model_config.load_in_8bit:
-        quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-        )
-    else:
-        quantization_config = None
-
-    return quantization_config
-
-
-def get_kbit_device_map() -> Optional[Dict[str, int]]:
-    if is_xpu_available():
-        return {"": f"xpu:{PartialState().local_process_index}"}
-    elif torch.cuda.is_available():
-        return {"": PartialState().local_process_index}
-    else:
-        return None
-
-
-def get_peft_config(model_config: ModelConfig) -> "Optional[PeftConfig]":
-    if model_config.use_peft is False:
-        return None
-
-    if not is_peft_available():
-        raise ValueError(
-            "You need to have PEFT library installed in your environment, make sure to install `peft`. "
-            "Make sure to run `pip install -U peft`."
-        )
-
-    peft_config = LoraConfig(
-        r=model_config.lora_r,
-        lora_alpha=model_config.lora_alpha,
-        lora_dropout=model_config.lora_dropout,
-        bias="none",
-        task_type=model_config.lora_task_type,
-        target_modules=model_config.lora_target_modules,
-        modules_to_save=model_config.lora_modules_to_save,
-    )
-
-    return peft_config
-
-
-class RichProgressCallback(TrainerCallback):
-    """
-    A [`TrainerCallback`] that displays the progress of training or evaluation using Rich.
-    """
-
-    def __init__(self):
-        self.training_bar = None
-        self.prediction_bar = None
-
-        self.training_task_id = None
-        self.prediction_task_id = None
-
-        self.rich_group = None
-        self.rich_console = None
-
-        self.training_status = None
-        self.current_step = None
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        if state.is_world_process_zero:
-            self.training_bar = Progress()
-            self.prediction_bar = Progress()
-
-            self.rich_console = Console()
-
-            self.training_status = self.rich_console.status("Nothing to log yet ...")
-
-            self.rich_group = Live(Panel(Group(self.training_bar, self.prediction_bar, self.training_status)))
-            self.rich_group.start()
-
-            self.training_task_id = self.training_bar.add_task("[blue]Training the model", total=state.max_steps)
-            self.current_step = 0
-
-    def on_step_end(self, args, state, control, **kwargs):
-        if state.is_world_process_zero:
-            self.training_bar.update(self.training_task_id, advance=state.global_step - self.current_step, update=True)
-            self.current_step = state.global_step
-
-    def on_prediction_step(self, args, state, control, eval_dataloader=None, **kwargs):
-        if state.is_world_process_zero and has_length(eval_dataloader):
-            if self.prediction_task_id is None:
-                self.prediction_task_id = self.prediction_bar.add_task(
-                    "[blue]Predicting on the evaluation dataset", total=len(eval_dataloader)
-                )
-            self.prediction_bar.update(self.prediction_task_id, advance=1, update=True)
-
-    def on_evaluate(self, args, state, control, **kwargs):
-        if state.is_world_process_zero:
-            if self.prediction_task_id is not None:
-                self.prediction_bar.remove_task(self.prediction_task_id)
-                self.prediction_task_id = None
-
-    def on_predict(self, args, state, control, **kwargs):
-        if state.is_world_process_zero:
-            if self.prediction_task_id is not None:
-                self.prediction_bar.remove_task(self.prediction_task_id)
-                self.prediction_task_id = None
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        if state.is_world_process_zero and self.training_bar is not None:
-            _ = logs.pop("total_flos", None)
-            self.training_status.update(f"[bold green]Status = {str(logs)}")
-
-    def on_train_end(self, args, state, control, **kwargs):
-        if state.is_world_process_zero:
-            self.rich_group.stop()
-
-            self.training_bar = None
-            self.prediction_bar = None
-            self.training_task_id = None
-            self.prediction_task_id = None
-            self.rich_group = None
-            self.rich_console = None
-            self.training_status = None
-            self.current_step = None

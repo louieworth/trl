@@ -17,22 +17,15 @@ import tempfile
 import unittest
 
 import numpy as np
-import pytest
 import torch
-from datasets import Dataset, Image, Sequence
-from transformers import (
-    AutoModelForCausalLM,
-    AutoProcessor,
-    AutoTokenizer,
-    LlavaForConditionalGeneration,
-    TrainingArguments,
-)
+from datasets import Dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
 
 from trl import SFTTrainer
-from trl.import_utils import is_peft_available, is_pil_available
+from trl.import_utils import is_peft_available
 from trl.trainer import ConstantLengthDataset, DataCollatorForCompletionOnlyLM
 
-from .testing_utils import require_peft, requires_pil
+from .testing_utils import require_peft
 
 
 def formatting_prompts_func(example):
@@ -50,9 +43,6 @@ def formatting_prompts_func_batched(example):
 
 if is_peft_available():
     from peft import LoraConfig, PeftModel
-
-if is_pil_available():
-    from PIL import Image as PILImage
 
 
 class SFTTrainerTester(unittest.TestCase):
@@ -95,85 +85,6 @@ class SFTTrainerTester(unittest.TestCase):
                 ],
             }
         )
-        cls.dummy_chatml_dataset = Dataset.from_dict(
-            {
-                "messages": [
-                    [
-                        {"role": "system", "content": "You are helpful"},
-                        {"role": "user", "content": "Hello"},
-                        {"role": "assistant", "content": "Hi, how can I help you?"},
-                        {"role": "user", "content": "What is 2+2?"},
-                        {"role": "assistant", "content": "4"},
-                        {"role": "user", "content": "What is 3+3?"},
-                        {"role": "assistant", "content": "6"},
-                    ],
-                    [
-                        {"role": "system", "content": "You are helpful"},
-                        {"role": "user", "content": "Hello"},
-                        {"role": "assistant", "content": "Hi, how can I help you?"},
-                    ],
-                ]
-            }
-        )
-        cls.dummy_instruction_dataset = Dataset.from_list(
-            [
-                {"prompt": "What is 2+2?", "completion": "4"},
-                {"prompt": "What is 3+3?", "completion": "6"},
-                {"prompt": "What is 4+4?", "completion": "8"},
-                {"prompt": "What is 2+2?", "completion": "4"},
-                {"prompt": "What is 3+3?", "completion": "6"},
-                {"prompt": "What is 4+4?", "completion": "8"},
-                {"prompt": "What is 2+2?", "completion": "4"},
-                {"prompt": "What is 3+3?", "completion": "6"},
-                {"prompt": "What is 4+4?", "completion": "8"},
-                {"prompt": "What is 2+2?", "completion": "4"},
-                {"prompt": "What is 3+3?", "completion": "6"},
-                {"prompt": "What is 4+4?", "completion": "8"},
-            ]
-        )
-
-        if is_pil_available():
-            cls.dummy_vsft_instruction_dataset = Dataset.from_dict(
-                {
-                    "messages": [
-                        [
-                            {
-                                "role": "user",
-                                "content": [{"type": "text", "text": "What is in this image?"}, {"type": "image"}],
-                            },
-                            {
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": "It is random noise."}],
-                            },
-                            {
-                                "role": "user",
-                                "content": [{"type": "text", "text": "Oh ye, you are right, what is 1+1"}],
-                            },
-                            {
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": "2"}],
-                            },
-                        ],
-                        [
-                            {
-                                "role": "user",
-                                "content": [{"type": "text", "text": "What is in this image?"}, {"type": "image"}],
-                            },
-                            {
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": "It is random noise."}],
-                            },
-                        ],
-                    ],
-                    "images": [
-                        [PILImage.fromarray((np.random.rand(40, 50, 3) * 255).astype("uint8")).convert("RGBA")],
-                        [PILImage.fromarray((np.random.rand(50, 60, 3) * 255).astype("uint8")).convert("RGBA")],
-                    ],
-                }
-            )
-            cls.dummy_vsft_instruction_dataset = cls.dummy_vsft_instruction_dataset.cast_column(
-                "images", Sequence(Image())
-            )
 
         cls.train_dataset = ConstantLengthDataset(
             cls.tokenizer,
@@ -201,18 +112,18 @@ class SFTTrainerTester(unittest.TestCase):
             formatting_func=formatting_prompts_func,
         )
 
-        assert len(formatted_dataset) == len(self.dummy_dataset)
-        assert len(formatted_dataset) > 0
+        self.assertTrue(len(formatted_dataset) == len(self.dummy_dataset))
+        self.assertTrue(len(formatted_dataset) > 0)
 
         for example in formatted_dataset:
-            assert "input_ids" in example
-            assert "labels" in example
+            self.assertTrue("input_ids" in example)
+            self.assertTrue("labels" in example)
 
-            assert len(example["input_ids"]) == formatted_dataset.seq_length
-            assert len(example["labels"]) == formatted_dataset.seq_length
+            self.assertTrue(len(example["input_ids"]) == formatted_dataset.seq_length)
+            self.assertTrue(len(example["labels"]) == formatted_dataset.seq_length)
 
             decoded_text = self.tokenizer.decode(example["input_ids"])
-            assert ("Question" in decoded_text) and ("Answer" in decoded_text)
+            self.assertTrue(("Question" in decoded_text) and ("Answer" in decoded_text))
 
     def test_sft_trainer(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -236,10 +147,10 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
-            assert trainer.state.log_history[0]["eval_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
+            self.assertIsNotNone(trainer.state.log_history[0]["eval_loss"])
 
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2"))
 
     def test_sft_trainer_uncorrect_data(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -253,65 +164,25 @@ class SFTTrainerTester(unittest.TestCase):
                 per_device_train_batch_size=2,
             )
 
-            with pytest.raises(ValueError):
+            with self.assertRaises(ValueError):
                 _ = SFTTrainer(
                     model=self.model,
                     args=training_args,
                     train_dataset=self.dummy_dataset,
                     packing=True,
                 )
-            # this should work since the dummy chatml include the correct format
-            _ = SFTTrainer(
-                model=self.model,
-                args=training_args,
-                train_dataset=self.dummy_chatml_dataset,
-                max_seq_length=32,  # make sure there is at least 1 packed sequence
-                num_of_sequences=32,
-                packing=True,
-            )
-            _ = SFTTrainer(
-                model=self.model,
-                args=training_args,
-                train_dataset=self.dummy_chatml_dataset,
-                packing=False,
-            )
-            # this should work since the dummy instruction dataset is the correct format
-            _ = SFTTrainer(
-                model=self.model,
-                args=training_args,
-                train_dataset=self.dummy_instruction_dataset,
-                max_seq_length=16,  # make sure there is at least 1 packed sequence
-                packing=True,
-            )
-            _ = SFTTrainer(
-                model=self.model,
-                args=training_args,
-                train_dataset=self.dummy_instruction_dataset,
-                packing=False,
-            )
+
             # This should work
             _ = SFTTrainer(
                 model=self.model,
                 args=training_args,
                 train_dataset=self.dummy_dataset,
                 formatting_func=formatting_prompts_func,
-                max_seq_length=32,  # make sure there is at least 1 packed sequence
                 packing=True,
             )
 
-            with pytest.raises(ValueError):
-                # This should not work because not enough data for one sample
-                _ = SFTTrainer(
-                    model=self.model,
-                    args=training_args,
-                    train_dataset=self.dummy_dataset,
-                    formatting_func=formatting_prompts_func,
-                    max_seq_length=1024,  # make sure there is NOT at least 1 packed sequence
-                    packing=True,
-                )
-
             # This should not work as well
-            with pytest.raises(ValueError):
+            with self.assertRaises(ValueError):
                 _ = SFTTrainer(
                     model=self.model,
                     args=training_args,
@@ -320,7 +191,7 @@ class SFTTrainerTester(unittest.TestCase):
                     packing=False,
                 )
 
-            # but this should work
+            # but this shpuld work
             _ = SFTTrainer(
                 model=self.model,
                 args=training_args,
@@ -352,10 +223,10 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
-            assert trainer.state.log_history[0]["eval_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
+            self.assertIsNotNone(trainer.state.log_history[0]["eval_loss"])
 
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2"))
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             training_args = TrainingArguments(
@@ -380,9 +251,9 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
 
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2"))
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             training_args = TrainingArguments(
@@ -405,9 +276,9 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
 
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-1")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-1"))
 
     def test_sft_trainer_with_model(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -431,10 +302,10 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
-            assert trainer.state.log_history[0]["eval_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
+            self.assertIsNotNone(trainer.state.log_history[0]["eval_loss"])
 
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2"))
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             training_args = TrainingArguments(
@@ -458,9 +329,9 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
 
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2"))
 
         # with formatting_func + packed
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -485,9 +356,9 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
 
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2"))
 
         # with formatting_func + packed
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -510,9 +381,9 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
 
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2"))
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             training_args = TrainingArguments(
@@ -534,40 +405,9 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
 
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-1")
-
-    def test_sft_trainer_with_multiple_eval_datasets(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            training_args = TrainingArguments(
-                output_dir=tmp_dir,
-                dataloader_drop_last=True,
-                evaluation_strategy="steps",
-                max_steps=1,
-                eval_steps=1,
-                save_steps=1,
-                per_device_train_batch_size=2,
-            )
-
-            trainer = SFTTrainer(
-                model=self.model_id,
-                args=training_args,
-                train_dataset=self.train_dataset,
-                eval_dataset={
-                    "data1": self.eval_dataset,
-                    "data2": self.eval_dataset,
-                },
-                packing=True,
-            )
-
-            trainer.train()
-
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
-            assert trainer.state.log_history[0]["eval_data1_loss"] is not None
-            assert trainer.state.log_history[1]["eval_data2_loss"] is not None
-
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-1")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-1"))
 
     def test_data_collator_completion_lm(self):
         response_template = "### Response:\n"
@@ -582,7 +422,7 @@ class SFTTrainerTester(unittest.TestCase):
         labels = batch["labels"]
         last_pad_idx = np.where(labels == -100)[1][-1]
         result_text = self.tokenizer.decode(batch["input_ids"][0, last_pad_idx + 1 :])
-        assert result_text == "I have not been masked correctly."
+        self.assertEqual(result_text, "I have not been masked correctly.")
 
     def test_data_collator_completion_lm_with_multiple_text(self):
         tokenizer = copy.deepcopy(self.tokenizer)
@@ -605,7 +445,7 @@ class SFTTrainerTester(unittest.TestCase):
             labels = batch["labels"][i]
             last_pad_idx = np.where(labels == -100)[0][-1]
             result_text = tokenizer.decode(batch["input_ids"][i, last_pad_idx + 1 :])
-            assert result_text == "I have not been masked correctly."
+            self.assertEqual(result_text, "I have not been masked correctly.")
 
     def test_data_collator_chat_completion_lm(self):
         instruction_template = "### Human:"
@@ -626,7 +466,7 @@ class SFTTrainerTester(unittest.TestCase):
         labels = batch["labels"]
         non_masked_tokens = batch["input_ids"][labels != -100]
         result_text = self.tokenizer.decode(non_masked_tokens)
-        assert result_text == " I should not be masked. I should not be masked too."
+        self.assertEqual(result_text, " I should not be masked. I should not be masked too.")
 
     def test_data_collator_chat_completion_lm_with_multiple_text(self):
         tokenizer = copy.deepcopy(self.tokenizer)
@@ -654,11 +494,11 @@ class SFTTrainerTester(unittest.TestCase):
 
         non_masked_tokens1 = input_ids[0][labels[0] != -100]
         result_text1 = tokenizer.decode(non_masked_tokens1)
-        assert result_text1 == " I should not be masked."
+        self.assertEqual(result_text1, " I should not be masked.")
 
         non_masked_tokens2 = input_ids[1][labels[1] != -100]
         result_text2 = tokenizer.decode(non_masked_tokens2)
-        assert result_text2 == " I should not be masked. I should not be masked too."
+        self.assertEqual(result_text2, " I should not be masked. I should not be masked too.")
 
     def test_sft_trainer_infinite_with_model(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -681,15 +521,15 @@ class SFTTrainerTester(unittest.TestCase):
                 max_seq_length=500,
             )
 
-            assert trainer.train_dataset.infinite
+            self.assertTrue(trainer.train_dataset.infinite)
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
-            assert trainer.state.log_history[0]["eval_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
+            self.assertIsNotNone(trainer.state.log_history[0]["eval_loss"])
 
             # make sure the trainer did 5 steps
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-5")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-5"))
 
     def test_sft_trainer_infinite_with_model_epochs(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -710,14 +550,14 @@ class SFTTrainerTester(unittest.TestCase):
                 max_seq_length=500,
             )
 
-            assert not trainer.train_dataset.infinite
+            self.assertFalse(trainer.train_dataset.infinite)
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
 
             # make sure the trainer did 5 steps
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-4")
+            self.assertTrue("model.safetensors" in os.listdir(tmp_dir + "/checkpoint-4"))
 
     def test_sft_trainer_with_model_neftune(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -751,8 +591,8 @@ class SFTTrainerTester(unittest.TestCase):
             torch.random.manual_seed(24)
             embeds_neftune_2 = trainer.model.get_input_embeddings()(torch.LongTensor([[1, 0, 1]]).to(device))
 
-            assert not torch.allclose(embeds_neftune, embeds_neftune_2)
-            assert len(trainer.model.get_input_embeddings()._forward_hooks) > 0
+            self.assertFalse(torch.allclose(embeds_neftune, embeds_neftune_2))
+            self.assertTrue(len(trainer.model.get_input_embeddings()._forward_hooks) > 0)
 
             trainer.neftune_hook_handle.remove()
 
@@ -760,26 +600,7 @@ class SFTTrainerTester(unittest.TestCase):
 
             # Make sure forward pass works fine
             _ = trainer.model(torch.LongTensor([[1, 0, 1]]).to(device))
-            assert len(trainer.model.get_input_embeddings()._forward_hooks) == 0
-
-    @require_peft
-    def test_peft_sft_trainer_str(self):
-        peft_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-
-        _ = SFTTrainer(
-            model=self.model_id,
-            args=None,
-            train_dataset=self.train_dataset,
-            eval_dataset=self.eval_dataset,
-            peft_config=peft_config,
-            packing=True,
-        )
+            self.assertTrue(len(trainer.model.get_input_embeddings()._forward_hooks) == 0)
 
     @require_peft
     def test_peft_sft_trainer(self):
@@ -811,58 +632,16 @@ class SFTTrainerTester(unittest.TestCase):
                 packing=True,
             )
 
-            assert isinstance(trainer.model, PeftModel)
+            self.assertTrue(isinstance(trainer.model, PeftModel))
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
-            assert trainer.state.log_history[0]["eval_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
+            self.assertIsNotNone(trainer.state.log_history[0]["eval_loss"])
 
-            assert "adapter_model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
-            assert "adapter_config.json" in os.listdir(tmp_dir + "/checkpoint-2")
-            assert "model.safetensors" not in os.listdir(tmp_dir + "/checkpoint-2")
-
-    @require_peft
-    def test_peft_sft_trainer_gc(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            training_args = TrainingArguments(
-                output_dir=tmp_dir,
-                dataloader_drop_last=True,
-                evaluation_strategy="steps",
-                max_steps=4,
-                eval_steps=2,
-                save_steps=2,
-                per_device_train_batch_size=2,
-                gradient_checkpointing=True,
-            )
-
-            peft_config = LoraConfig(
-                r=16,
-                lora_alpha=32,
-                lora_dropout=0.05,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-
-            trainer = SFTTrainer(
-                model=self.model_id,
-                args=training_args,
-                train_dataset=self.train_dataset,
-                eval_dataset=self.eval_dataset,
-                peft_config=peft_config,
-                packing=True,
-            )
-
-            assert isinstance(trainer.model, PeftModel)
-
-            trainer.train()
-
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
-            assert trainer.state.log_history[0]["eval_loss"] is not None
-
-            assert "adapter_model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
-            assert "adapter_config.json" in os.listdir(tmp_dir + "/checkpoint-2")
-            assert "model.safetensors" not in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue("adapter_model.bin" in os.listdir(tmp_dir + "/checkpoint-2"))
+            self.assertTrue("adapter_config.json" in os.listdir(tmp_dir + "/checkpoint-2"))
+            self.assertTrue("model.safetensors" not in os.listdir(tmp_dir + "/checkpoint-2"))
 
     @require_peft
     def test_peft_sft_trainer_neftune(self):
@@ -897,7 +676,7 @@ class SFTTrainerTester(unittest.TestCase):
 
             trainer.model = trainer._trl_activate_neftune(trainer.model)
 
-            assert isinstance(trainer.model, PeftModel)
+            self.assertTrue(isinstance(trainer.model, PeftModel))
 
             device = trainer.model.get_input_embeddings().weight.device
             trainer.model.train()
@@ -908,219 +687,20 @@ class SFTTrainerTester(unittest.TestCase):
             torch.random.manual_seed(24)
             embeds_neftune_2 = trainer.model.get_input_embeddings()(torch.LongTensor([[1, 0, 1]]).to(device))
 
-            assert not torch.allclose(embeds_neftune, embeds_neftune_2)
-            assert len(trainer.model.get_input_embeddings()._forward_hooks) > 0
+            self.assertFalse(torch.allclose(embeds_neftune, embeds_neftune_2))
+            self.assertTrue(len(trainer.model.get_input_embeddings()._forward_hooks) > 0)
 
             trainer.neftune_hook_handle.remove()
 
             trainer.train()
 
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
-            assert trainer.state.log_history[0]["eval_loss"] is not None
+            self.assertIsNotNone(trainer.state.log_history[-1]["train_loss"])
+            self.assertIsNotNone(trainer.state.log_history[0]["eval_loss"])
 
-            assert "adapter_model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
-            assert "adapter_config.json" in os.listdir(tmp_dir + "/checkpoint-2")
-            assert "model.safetensors" not in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue("adapter_model.bin" in os.listdir(tmp_dir + "/checkpoint-2"))
+            self.assertTrue("adapter_config.json" in os.listdir(tmp_dir + "/checkpoint-2"))
+            self.assertTrue("model.safetensors" not in os.listdir(tmp_dir + "/checkpoint-2"))
 
             # Make sure forward pass works fine to check if embeddings forward is not broken.
             _ = trainer.model(torch.LongTensor([[1, 0, 1]]).to(device))
-            assert len(trainer.model.get_input_embeddings()._forward_hooks) == 0
-
-    @require_peft
-    def test_peft_sft_trainer_tag(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            training_args = TrainingArguments(
-                output_dir=tmp_dir,
-                dataloader_drop_last=True,
-                evaluation_strategy="steps",
-                max_steps=4,
-                eval_steps=2,
-                save_steps=2,
-                per_device_train_batch_size=2,
-                gradient_checkpointing=True,
-            )
-
-            peft_config = LoraConfig(
-                r=16,
-                lora_alpha=32,
-                lora_dropout=0.05,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-
-            trainer = SFTTrainer(
-                model=self.model_id,
-                args=training_args,
-                train_dataset=self.train_dataset,
-                eval_dataset=self.eval_dataset,
-                peft_config=peft_config,
-                packing=True,
-            )
-
-            assert trainer.model.model_tags == trainer._tag_names
-
-    @require_peft
-    def test_sft_trainer_tag(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            training_args = TrainingArguments(
-                output_dir=tmp_dir,
-                dataloader_drop_last=True,
-                evaluation_strategy="steps",
-                max_steps=4,
-                eval_steps=2,
-                save_steps=2,
-                per_device_train_batch_size=2,
-                gradient_checkpointing=True,
-            )
-
-            trainer = SFTTrainer(
-                model=self.model_id,
-                args=training_args,
-                train_dataset=self.train_dataset,
-                eval_dataset=self.eval_dataset,
-                packing=True,
-            )
-
-            assert trainer.model.model_tags == trainer._tag_names
-
-    def test_sft_trainer_eval_packing(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            training_args = TrainingArguments(
-                output_dir=tmp_dir,
-                dataloader_drop_last=True,
-                evaluation_strategy="steps",
-                max_steps=4,
-                eval_steps=2,
-                save_steps=2,
-                per_device_train_batch_size=2,
-                gradient_checkpointing=True,
-            )
-
-            trainer = SFTTrainer(
-                model=self.model_id,
-                args=training_args,
-                train_dataset=self.dummy_chatml_dataset,
-                eval_dataset=self.dummy_chatml_dataset,
-                packing=True,
-                max_seq_length=32,  # make sure there is at least 1 packed sequence
-                eval_packing=False,
-            )
-
-            assert len(trainer.train_dataset["input_ids"]) == 1
-            assert len(trainer.eval_dataset["input_ids"]) != 1
-
-            trainer = SFTTrainer(
-                model=self.model_id,
-                args=training_args,
-                train_dataset=self.dummy_chatml_dataset,
-                eval_dataset=self.dummy_chatml_dataset,
-                max_seq_length=32,  # make sure there is at least 1 packed sequence
-                packing=True,
-            )
-
-            assert len(trainer.train_dataset["input_ids"]) == 1
-            assert len(trainer.eval_dataset["input_ids"]) == 1
-
-            trainer = SFTTrainer(
-                model=self.model_id,
-                args=training_args,
-                train_dataset=self.dummy_chatml_dataset,
-                eval_dataset=self.dummy_chatml_dataset,
-                max_seq_length=32,  # make sure there is at least 1 packed sequence
-                packing=False,
-            )
-
-            assert len(trainer.train_dataset["input_ids"]) != 1
-            assert len(trainer.eval_dataset["input_ids"]) != 1
-
-    @requires_pil
-    def test_sft_trainer_skip_prepare_dataset(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            training_args = TrainingArguments(
-                output_dir=tmp_dir,
-                dataloader_drop_last=True,
-                evaluation_strategy="steps",
-                max_steps=4,
-                eval_steps=2,
-                save_steps=2,
-                per_device_train_batch_size=2,
-                gradient_checkpointing=True,
-                remove_unused_columns=False,
-            )
-
-            trainer = SFTTrainer(
-                model=self.model_id,
-                args=training_args,
-                train_dataset=self.dummy_vsft_instruction_dataset,
-                eval_dataset=self.dummy_vsft_instruction_dataset,
-                dataset_text_field="text",  # need a dummy field
-                dataset_kwargs={"skip_prepare_dataset": True},
-            )
-            assert trainer.train_dataset.features == self.dummy_vsft_instruction_dataset.features
-            assert trainer.eval_dataset.features == self.dummy_vsft_instruction_dataset.features
-
-    @requires_pil
-    def test_sft_trainer_llava(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            training_args = TrainingArguments(
-                output_dir=tmp_dir,
-                dataloader_drop_last=True,
-                evaluation_strategy="steps",
-                max_steps=4,
-                eval_steps=2,
-                save_steps=2,
-                per_device_train_batch_size=2,
-                per_device_eval_batch_size=2,
-                remove_unused_columns=False,
-            )
-            tiny_llava = LlavaForConditionalGeneration.from_pretrained(
-                "trl-internal-testing/tiny-random-LlavaForConditionalGeneration"
-            )
-            processor = AutoProcessor.from_pretrained("trl-internal-testing/tiny-random-LlavaForConditionalGeneration")
-
-            processor.tokenizer.chat_template = """A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. {% for message in messages %}{% if message['role'] == 'user' %}USER: {% else %}ASSISTANT: {% endif %}{% for item in message['content'] %}{% if item['type'] == 'text' %}{{ item['text'] }}{% elif item['type'] == 'image' %}<image>{% endif %}{% endfor %}{% if message['role'] == 'user' %} {% else %}{{eos_token}}{% endif %}{% endfor %}"""
-
-            class LLavaDataCollator:
-                def __init__(self, processor):
-                    self.processor = processor
-
-                def __call__(self, examples):
-                    texts = []
-                    images = []
-                    for example in examples:
-                        if len(example["images"]) > 1:
-                            raise ValueError("This collator only supports one image per example")
-                        messages = example["messages"]
-                        text = self.processor.tokenizer.apply_chat_template(
-                            messages, tokenize=False, add_generation_prompt=False
-                        )
-                        texts.append(text)
-                        images.append(example["images"][0])
-
-                    batch = self.processor(texts, images, return_tensors="pt", padding=True)
-
-                    labels = batch["input_ids"].clone()
-                    if self.processor.tokenizer.pad_token_id is not None:
-                        labels[labels == self.processor.tokenizer.pad_token_id] = -100
-                    batch["labels"] = labels
-
-                    return batch
-
-            data_collator = LLavaDataCollator(processor)
-
-            trainer = SFTTrainer(
-                model=tiny_llava,
-                args=training_args,
-                train_dataset=self.dummy_vsft_instruction_dataset,
-                eval_dataset=self.dummy_vsft_instruction_dataset,
-                dataset_text_field="text",  # need a dummy field
-                dataset_kwargs={"skip_prepare_dataset": True},
-                data_collator=data_collator,
-            )
-
-            trainer.train()
-
-            assert trainer.state.log_history[(-1)]["train_loss"] is not None
-            assert trainer.state.log_history[0]["eval_loss"] is not None
-
-            assert "model.safetensors" in os.listdir(tmp_dir + "/checkpoint-2")
+            self.assertTrue(len(trainer.model.get_input_embeddings()._forward_hooks) == 0)

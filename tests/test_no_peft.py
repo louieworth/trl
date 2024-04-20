@@ -13,10 +13,8 @@
 # limitations under the License.
 import sys
 import unittest
-from functools import partial
 from unittest.mock import patch
 
-import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -95,15 +93,15 @@ class TestPeftDependancy(unittest.TestCase):
             from trl import AutoModelForCausalLMWithValueHead, AutoModelForSeq2SeqLMWithValueHead
 
             # Check that loading a model with `peft` will raise an error
-            with pytest.raises(ModuleNotFoundError):
-                import peft  # noqa: F401
+            with self.assertRaises(ModuleNotFoundError):
+                import peft  # noqa
 
-            _trl_model = AutoModelForCausalLMWithValueHead.from_pretrained(self.causal_lm_model_id)
-            _trl_seq2seq_model = AutoModelForSeq2SeqLMWithValueHead.from_pretrained(self.seq_to_seq_model_id)
+            trl_model = AutoModelForCausalLMWithValueHead.from_pretrained(self.causal_lm_model_id)  # noqa
+            trl_seq2seq_model = AutoModelForSeq2SeqLMWithValueHead.from_pretrained(self.seq_to_seq_model_id)  # noqa
 
     def test_imports_no_peft(self):
         with patch.dict(sys.modules, {"peft": None}):
-            from trl import (  # noqa: F401
+            from trl import (  # noqa
                 AutoModelForCausalLMWithValueHead,
                 AutoModelForSeq2SeqLMWithValueHead,
                 PPOConfig,
@@ -135,7 +133,6 @@ class TestPeftDependancy(unittest.TestCase):
                 tokenizer=tokenizer,
                 dataset=dummy_dataset,
             )
-            ppo_trainer.optimizer.zero_grad = partial(ppo_trainer.optimizer.zero_grad, set_to_none=False)
             dummy_dataloader = ppo_trainer.dataloader
 
             for query_tensor, response_tensor in dummy_dataloader:
@@ -143,14 +140,14 @@ class TestPeftDependancy(unittest.TestCase):
                 # (this could be any reward such as human feedback or output from another model)
                 reward = [torch.tensor(1.0), torch.tensor(0.0)]
                 # train model
-                train_stats = ppo_trainer.step(list(query_tensor), list(response_tensor), reward)
+                train_stats = ppo_trainer.step([q for q in query_tensor], [r for r in response_tensor], reward)
                 break
 
             # check gradients are not None
             for _, param in trl_model.named_parameters():
                 if param.requires_grad:
-                    assert param.grad is not None
+                    self.assertIsNotNone(param.grad)
 
             # check expected stats
             for stat in EXPECTED_STATS:
-                assert stat in train_stats
+                self.assertIn(stat, train_stats)

@@ -1013,7 +1013,6 @@ class DPOTrainer(Trainer):
     ):
         """Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
         metrics = {}
-
         (
             policy_chosen_logps,
             policy_rejected_logps,
